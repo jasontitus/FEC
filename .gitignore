@@ -41,6 +41,9 @@ CA/.update_metadata.json
 # Claude Code / IDE
 .claude/
 
+# Test artifacts
+tests/test_*.db
+
 # Editor files
 *.swp
 *.swo
