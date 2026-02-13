@@ -1,0 +1,15 @@
+# High-priority includes
+include src/**/*.py
+include **/app.py
+include **/unified_app.py
+
+# Deprioritize or exclude large/irrelevant stuff
+exclude .git/** 
+exclude **/__pycache__/**
+exclude **/node_modules/**
+exclude **/dist/**
+exclude **/*.min.* 
+exclude **/*.lock
+
+# Optional: cap very large single files
+max_file_size_bytes 300000   # ~300 KB per file
