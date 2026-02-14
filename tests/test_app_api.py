@@ -306,12 +306,12 @@ class TestPersonAPI(TestAPIBase):
         data = json.loads(resp.data)
         self.assertIn("percentiles", data)
 
-    def test_person_defaults_to_ca_state(self):
-        """Person search defaults to CA state when none specified."""
-        resp = self.client.get("/api/person?first_name=JOHN&last_name=SMITH")
+    def test_person_searches_all_states_when_none_specified(self):
+        """Person search searches all states when none specified."""
+        resp = self.client.get("/api/person?first_name=BOB&last_name=JONES")
         self.assertEqual(resp.status_code, 200)
         data = json.loads(resp.data)
-        # Should find CA results since it defaults to CA
+        # Should find NY results since no state filter is applied
         self.assertGreater(data["total_giving"], 0)
 
 

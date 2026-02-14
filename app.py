@@ -5,8 +5,10 @@ import time
 import math # For math.ceil
 from urllib.parse import urlencode, quote_plus # Added quote_plus
 import argparse
+import os
 
 app = Flask(__name__)
+URL_PREFIX = os.environ.get('URL_PREFIX', '')
 DB_PATH = "fec_contributions.db"
 PAGE_SIZE = 50 # Items per page for pagination
 PERSON_SEARCH_PAGE_SIZE = 10 # Specific page size for recent contributions on person page
@@ -29,6 +31,7 @@ def format_comma(value):
 app.jinja_env.filters['comma'] = format_comma
 app.jinja_env.globals['min'] = min
 app.jinja_env.globals['max'] = max
+app.jinja_env.globals['PREFIX'] = URL_PREFIX
 app.jinja_env.filters['quote_plus'] = quote_plus # Changed from globals to filters
 
 # Helper function to build CA app URLs with preserved parameters
@@ -450,9 +453,9 @@ def search():
 <body>
     <h1>FEC Contribution Search</h1>
     <div class="nav-links">
-        <a href="/">🔍 New Search</a>
-        <a href="/search_recipients">👥 Search Recipients by Name</a>
-        <a href="/personsearch">👤 Person Search</a>
+        <a href="{{ PREFIX }}/">🔍 New Search</a>
+        <a href="{{ PREFIX }}/search_recipients">👥 Search Recipients by Name</a>
+        <a href="{{ PREFIX }}/personsearch">👤 Person Search</a>
         <a href="{{ build_ca_app_url('/', original_params) }}" style="color: #ff6b35;" target="_blank">🏛️ Search CA Data</a>
     </div>
     <form method="get" onsubmit="document.getElementById('mainSearchButton').disabled = true; document.getElementById('mainLoadingIndicator').style.display = 'block';">
@@ -513,11 +516,11 @@ def search():
         {% for fn, ln, date, recip, amt, typ, cmte_id, city, state, zip in results %}
           <tr>
             {# Pass city, state, zip to contributor view #}
-            <td><a href="/contributor?first={{ fn }}&last={{ ln }}&city={{ city|urlencode }}&state={{ state|urlencode }}&zip={{ zip|urlencode }}">{{ fn }}</a></td>
-            <td><a href="/contributor?first={{ fn }}&last={{ ln }}&city={{ city|urlencode }}&state={{ state|urlencode }}&zip={{ zip|urlencode }}">{{ ln }}</a></td>
+            <td><a href="{{ PREFIX }}/contributor?first={{ fn }}&last={{ ln }}&city={{ city|urlencode }}&state={{ state|urlencode }}&zip={{ zip|urlencode }}">{{ fn }}</a></td>
+            <td><a href="{{ PREFIX }}/contributor?first={{ fn }}&last={{ ln }}&city={{ city|urlencode }}&state={{ state|urlencode }}&zip={{ zip|urlencode }}">{{ ln }}</a></td>
             <td>{{ date }}</td>
             <td>
-                <a href="/recipient?committee_id={{ cmte_id }}">{{ recip }}</a>
+                <a href="{{ PREFIX }}/recipient?committee_id={{ cmte_id }}">{{ recip }}</a>
                 <a href="https://www.google.com/search?q={{ recip|quote_plus }}" class="info-link" target="_blank" title="Search Google for {{ recip }}">&#x24D8;</a>
             </td>
             <td>{{ amt|currency }}</td>
@@ -530,7 +533,7 @@ def search():
       </table>
       {% if total_pages > 1 %}
       <div class="pagination">
-          {% set base_url = "/?" + urlencode(pagination_params) %}
+          {% set base_url = PREFIX + "/?" + urlencode(pagination_params) %}
           {% if page > 1 %}
               <a href="{{ base_url }}&page={{ page - 1 }}">&laquo; Previous</a>
           {% endif %}
@@ -655,7 +658,7 @@ def contributor_view():
     if state: pagination_params["state"] = state
     if zip_code: pagination_params["zip"] = zip_code
     # Add any other persistent query params if needed (e.g., sort order from original search? - Not currently passed)
-    base_pagination_url = "/contributor?" + urlencode(pagination_params)
+    base_pagination_url = URL_PREFIX + "/contributor?" + urlencode(pagination_params)
 
     # --- Render Template --- 
     # Construct a filter description string
@@ -703,9 +706,9 @@ def contributor_view():
     <h1>Contributions by {{ first }} {{ last }}</h1>
     <div class="filter-info">Showing contributions matching: {{ filter_desc }}</div>
     <div class="nav-links">
-        <a href="/">🔍 New Search</a>
-        <a href="/search_recipients">👥 Search Recipients by Name</a>
-        <a href="/personsearch">👤 Person Search</a>
+        <a href="{{ PREFIX }}/">🔍 New Search</a>
+        <a href="{{ PREFIX }}/search_recipients">👥 Search Recipients by Name</a>
+        <a href="{{ PREFIX }}/personsearch">👤 Person Search</a>
         <a href="{{ build_ca_app_url('/contributor', {'first': first, 'last': last, 'city': city, 'state': state, 'zip': zip_code}) }}" style="color: #ff6b35;" target="_blank">🏛️ Search CA Data</a>
     </div>
     <h2>Total Contributed (matching filter, all pages): {{ total_amount_for_contributor|currency }}</h2>
@@ -750,7 +753,7 @@ def contributor_view():
         <tr>
           <td>{{ r_date }}</td>
           <td>
-              <a href="/recipient?committee_id={{ r_cmte_id }}">{{ r_name }}</a>
+              <a href="{{ PREFIX }}/recipient?committee_id={{ r_cmte_id }}">{{ r_name }}</a>
               <a href="https://www.google.com/search?q={{ r_name|quote_plus }}" class="info-link" target="_blank" title="Search Google for {{ r_name }}">&#x24D8;</a>
           </td>
           <td>{{ r_amt|currency }}</td>
@@ -815,8 +818,8 @@ def recipient_view():
 <body>
     <h1>{KNOWN_CONDUITS[committee_id]} is a passthrough platform. No direct contributors shown.</h1>
     <div class="nav-links">
-        <a href='/'>🔍 Back to search</a>
-        <a href="/personsearch">👤 Person Search</a>
+        <a href='{{ PREFIX }}/'>🔍 Back to search</a>
+        <a href="{{ PREFIX }}/personsearch">👤 Person Search</a>
     </div>
 </body>
 </html>
@@ -940,9 +943,9 @@ def recipient_view():
     <h1>Top Contributors to {{ recipient_name }}</h1>
     <p style="color: #666; margin-bottom: 20px;"><em>Showing all-time contribution totals across all years in database</em></p>
     <div class="nav-links">
-        <a href="/">🔍 New Search</a>
-        <a href="/search_recipients">👥 Search Recipients by Name</a>
-        <a href="/personsearch">👤 Person Search</a>
+        <a href="{{ PREFIX }}/">🔍 New Search</a>
+        <a href="{{ PREFIX }}/search_recipients">👥 Search Recipients by Name</a>
+        <a href="{{ PREFIX }}/personsearch">👤 Person Search</a>
     </div>
     <div class="results-summary">
       Showing top {{ (page - 1) * PAGE_SIZE + 1 if total_results > 0 else 0 }} - {{ min(page * PAGE_SIZE, total_results) }} of {{ total_results }} contributors.
@@ -952,15 +955,15 @@ def recipient_view():
       {% for fn, ln, total in rows %}
         <tr>
           {# Pass first/last name, but address info isn't available here to add #}
-          <td><a href="/contributor?first={{ fn }}&last={{ ln }}">{{ fn }}</a></td>
-          <td><a href="/contributor?first={{ fn }}&last={{ ln }}">{{ ln }}</a></td>
+          <td><a href="{{ PREFIX }}/contributor?first={{ fn }}&last={{ ln }}">{{ fn }}</a></td>
+          <td><a href="{{ PREFIX }}/contributor?first={{ fn }}&last={{ ln }}">{{ ln }}</a></td>
           <td>{{ total|currency }}</td>
         </tr>
       {% endfor %}
     </table>
     {% if total_pages > 1 %}
     <div class="pagination">
-        {% set base_url = "/recipient?committee_id=" + committee_id + "&" + query_params_without_page %}
+        {% set base_url = PREFIX + "/recipient?committee_id=" + committee_id + "&" + query_params_without_page %}
         {% if page > 1 %}
             <a href="{{ base_url }}&page={{ page - 1 }}">&laquo; Previous</a>
         {% endif %}
@@ -1185,9 +1188,9 @@ def search_recipients_by_name():
 <body>
     <h1>Search Recipients by Name</h1>
     <div class="nav-links">
-        <a href="/">🔍 Contribution Search</a>
-        <a href="/search_recipients">👥 New Recipient Search</a>
-        <a href="/personsearch">👤 Person Search</a>
+        <a href="{{ PREFIX }}/">🔍 Contribution Search</a>
+        <a href="{{ PREFIX }}/search_recipients">👥 New Recipient Search</a>
+        <a href="{{ PREFIX }}/personsearch">👤 Person Search</a>
         <a href="{{ build_ca_app_url('/search_recipients', {'name_query': request.args.get('name_query', ''), 'sort_by': request.args.get('sort_by', '')}) }}" style="color: #ff6b35;" target="_blank">🏛️ Search CA Recipients</a>
     </div>
     <form method="get" onsubmit="document.getElementById('recipientSearchButton').disabled = true; document.getElementById('recipientLoadingIndicator').style.display = 'inline';">
@@ -1224,9 +1227,9 @@ def search_recipients_by_name():
             </tr>
             {% for committee_id, name, type, total_contrib, total_amt, recent_contrib, recent_amt, last_date in results %}
               <tr>
-                <td><a href="/recipient?committee_id={{ committee_id }}">{{ committee_id }}</a></td>
+                <td><a href="{{ PREFIX }}/recipient?committee_id={{ committee_id }}">{{ committee_id }}</a></td>
                 <td>
-                    <a href="/recipient?committee_id={{ committee_id }}">{{ name }}</a>
+                    <a href="{{ PREFIX }}/recipient?committee_id={{ committee_id }}">{{ name }}</a>
                     <a href="https://www.google.com/search?q={{ name|quote_plus }}" class="info-link" target="_blank" title="Search Google for {{ name }}">&#x24D8;</a>
                 </td>
                 <td>{{ type if type else "Unknown" }}</td>
@@ -1258,7 +1261,7 @@ def search_recipients_by_name():
           </table>
           {% if total_pages > 1 %}
           <div class="pagination">
-              {% set base_url = "/search_recipients?name_query=" + request.args.get('name_query', '') + "&" + query_params_without_page %}
+              {% set base_url = PREFIX + "/search_recipients?name_query=" + request.args.get('name_query', '') + "&" + query_params_without_page %}
               {% if page > 1 %}
                   <a href="{{ base_url }}&page={{ page - 1 }}">&laquo; Previous</a>
               {% endif %}
@@ -1377,12 +1380,12 @@ def person_search_form():
     <body>
         <h1>Person Search</h1>
          <div class="nav-links">
-            <a href="/">🔍 Contribution Search</a>
-            <a href="/search_recipients">👥 Recipient Search</a>
-            <a href="/personsearch">👤 New Person Search</a>
+            <a href="{{ PREFIX }}/">🔍 Contribution Search</a>
+            <a href="{{ PREFIX }}/search_recipients">👥 Recipient Search</a>
+            <a href="{{ PREFIX }}/personsearch">👤 New Person Search</a>
             <a href="http://localhost:5001/personsearch" style="color: #ff6b35;" target="_blank">🏛️ CA Person Search</a>
         </div>
-        <form method="get" action="/person" onsubmit="document.getElementById('searchButton').disabled = true; document.getElementById('loading').style.display = 'block';">
+        <form method="get" action="{{ PREFIX }}/person" onsubmit="document.getElementById('searchButton').disabled = true; document.getElementById('loading').style.display = 'block';">
             <div class="form-group">
                 <label for="first">First Name:</label>
                 <input type="text" id="first" name="first" required>
@@ -1406,7 +1409,7 @@ def person_search_form():
                 <div class="form-group">
                     <label for="state">State:</label>
                     <input type="text" id="state" name="state" maxlength="2" size="4" style="width: auto;">
-                    <small>(Defaults to CA if blank)</small>
+                    <small>(2-letter code, searches all states if blank)</small>
                 </div>
                 <div class="form-group">
                     <label for="zip">ZIP Code:</label>
@@ -1499,15 +1502,11 @@ def person_view_results(): # Renamed function slightly to avoid potential confli
             db_where_clauses.append("c.city = ?")
             db_query_actual_params.append(current_db_params["city"])
             
-        # State handling: Apply explicit state OR default to CA (since FN/LN are always present here)
+        # State handling: Only apply if explicitly provided (no default)
         if current_db_params["state"]:
             db_where_clauses.append("c.state = ?")
             db_query_actual_params.append(current_db_params["state"])
             state_filter_applied = current_db_params["state"]
-        else: # Default to CA if no state provided
-            db_where_clauses.append("c.state = ?")
-            db_query_actual_params.append("CA")
-            state_filter_applied = "CA (Default)"
             
         if current_db_params["zip_code"]:
             db_where_clauses.append("c.zip_code LIKE ?")
@@ -1568,16 +1567,14 @@ def person_view_results(): # Renamed function slightly to avoid potential confli
         final_attempt_criteria = []
         if last_attempt_db_params.get('city'): final_attempt_criteria.append(f"City: {last_attempt_db_params['city']}")
         # State explanation for final attempt
-        if last_attempt_db_params.get('state'): 
+        if last_attempt_db_params.get('state'):
             final_attempt_criteria.append(f"State: {last_attempt_db_params['state']}")
-        elif original_form_params['first_name'] or original_form_params['last_name']: # Check if name was searched
-            final_attempt_criteria.append("State: CA (Default)")
             
         if last_attempt_db_params.get('zip_code'): final_attempt_criteria.append(f"ZIP: {last_attempt_db_params['zip_code']}")
         if final_attempt_criteria:
             no_results_message += f" matching: { ', '.join(final_attempt_criteria) }."
         else:
-            no_results_message += "." # Should include CA default if no state/city/zip provided
+            no_results_message += "."
             
         # Add details about failed cascades
         original_had_zip = original_form_params["zip_code"]
@@ -1670,7 +1667,7 @@ def person_view_results(): # Renamed function slightly to avoid potential confli
 </head>
 <body>
     <div class="container">
-        <a href="/personsearch" class="nav-link" style="float: right; margin-top:0;">↩ New Person Search Form</a>
+        <a href="{{ PREFIX }}/personsearch" class="nav-link" style="float: right; margin-top:0;">↩ New Person Search Form</a>
         <h1>{{ original_form_params.first_name }} {{ original_form_params.last_name }}</h1>
         
         <div class="search-params">
@@ -1697,7 +1694,7 @@ def person_view_results(): # Renamed function slightly to avoid potential confli
                     <tr>
                         <td>{{ contrib['contribution_date'] }}</td>
                         <td>
-                           <a href="/recipient?committee_id={{ contrib['committee_id'] }}" target="_blank" title="View recipient details">{{ contrib['recipient_display_name'] }}</a>
+                           <a href="{{ PREFIX }}/recipient?committee_id={{ contrib['committee_id'] }}" target="_blank" title="View recipient details">{{ contrib['recipient_display_name'] }}</a>
                         </td>
                         <td>{{ contrib['amount']|currency }}</td>
                         <td>{{ contrib['city'] }}, {{ contrib['state'] }} {{ contrib['zip_code'] }}</td>
@@ -2135,8 +2132,7 @@ def api_person():
         qp = [cp["first_name"], cp["last_name"]]
 
         if cp["city"]: wc.append("c.city = ?"); qp.append(cp["city"])
-        effective_state = cp["state"] if cp["state"] else "CA"
-        wc.append("c.state = ?"); qp.append(effective_state)
+        if cp["state"]: wc.append("c.state = ?"); qp.append(cp["state"])
         if cp["zip_code"]: wc.append("c.zip_code LIKE ?"); qp.append(cp["zip_code"] + "%")
 
         conduit_ph = ",".join(["?"] * len(KNOWN_CONDUITS))

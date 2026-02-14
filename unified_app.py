@@ -4,7 +4,7 @@ Unified Campaign Finance Search Application
 Supports both FEC (Federal) and CalAccess (California) databases
 """
 
-from flask import Flask, request, render_template_string, jsonify, redirect, url_for
+from flask import Flask, request, render_template_string, jsonify, redirect, url_for, make_response
 import sqlite3
 import pprint
 import time
@@ -23,6 +23,7 @@ except ImportError:
     pass  # python-dotenv not installed, that's okay
 
 app = Flask(__name__)
+URL_PREFIX = os.environ.get('URL_PREFIX', '')
 
 # Database paths
 FEC_DB_PATH = "fec_contributions.db"
@@ -30,12 +31,12 @@ CA_DB_PATH = "CA/ca_contributions.db"
 PAGE_SIZE = 50
 PERSON_SEARCH_PAGE_SIZE = 10
 
-# Current database context (stored in session-like manner)
-# In production, you'd use Flask sessions or cookies
-class AppState:
-    current_db = "fec"  # Default to federal
+# Default database (can be overridden via --default-db CLI arg)
+DEFAULT_DB = "fec"
 
-app_state = AppState()
+def get_current_db():
+    """Get current database selection from cookie, falling back to default."""
+    return request.cookies.get('db', DEFAULT_DB)
 
 # Jinja2 filters
 def format_currency(value):
@@ -88,6 +89,7 @@ def build_sort_url(column, current_params):
 app.jinja_env.globals['build_sort_url'] = build_sort_url
 app.jinja_env.globals['min'] = min
 app.jinja_env.globals['max'] = max
+app.jinja_env.globals['PREFIX'] = URL_PREFIX
 
 # Database connection helper
 def get_db(db_type=None):
@@ -95,7 +97,7 @@ def get_db(db_type=None):
     if db_type:
         db_to_use = db_type
     else:
-        db_to_use = app_state.current_db
+        db_to_use = get_current_db()
     
     if db_to_use == "ca":
         return sqlite3.connect(CA_DB_PATH)
@@ -106,21 +108,24 @@ def get_db(db_type=None):
 @app.route("/toggle_db")
 def toggle_database():
     """Toggle between FEC and CA databases."""
-    app_state.current_db = "ca" if app_state.current_db == "fec" else "fec"
-    
+    current = request.cookies.get('db', DEFAULT_DB)
+    new_db = "ca" if current == "fec" else "fec"
+
     # Preserve current search parameters
     preserved_params = {k: v for k, v in request.args.items() if k != 'db'}
-    
+
     # Redirect to main search with preserved parameters
     if preserved_params:
-        return redirect(f"/?{urlencode(preserved_params)}")
+        resp = make_response(redirect(f"{URL_PREFIX}/?{urlencode(preserved_params)}"))
     else:
-        return redirect("/")
+        resp = make_response(redirect(f"{URL_PREFIX}/"))
+    resp.set_cookie('db', new_db, max_age=60*60*24*365, path='/')
+    return resp
 
 # Get current database info for templates
 def get_db_info():
     """Get current database information for display."""
-    if app_state.current_db == "ca":
+    if get_current_db() == "ca":
         return {
             "name": "California",
             "emoji": "🏛️",
@@ -141,7 +146,7 @@ def get_db_info():
 
 # Add to template globals
 app.jinja_env.globals['get_db_info'] = get_db_info
-app.jinja_env.globals['current_db'] = lambda: app_state.current_db
+app.jinja_env.globals['current_db'] = lambda: get_current_db()
 
 # Search API functions
 def _safe_excerpt(text, limit=500):
@@ -501,7 +506,7 @@ CA_CONDUITS = [
 
 def get_conduits():
     """Get conduits for current database."""
-    if app_state.current_db == "ca":
+    if get_current_db() == "ca":
         return CA_CONDUITS
     else:
         return FEC_CONDUITS
@@ -586,7 +591,7 @@ def search():
         cursor = conn.cursor()
 
         # Database-specific query logic
-        if app_state.current_db == "ca":
+        if get_current_db() == "ca":
             # California query logic (no conduit filtering in WHERE)
             search_attempts = []
             base_attempt_params = original_params.copy()
@@ -827,6 +832,8 @@ def person_view_results():
         return "Missing required query parameters: 'first' and 'last'", 400
 
     # Search FEC database
+    import time as _time
+    _t0 = _time.time()
     fec_results = []
     fec_total = 0
     try:
@@ -851,8 +858,9 @@ def person_view_results():
             fec_query += " AND c.state = ?"
             fec_query_params.append(original_form_params["state"])
         if original_form_params["zip_code"]:
+            fec_zip = "".join(ch for ch in original_form_params["zip_code"] if ch.isdigit())
             fec_query += " AND c.zip_code LIKE ?"
-            fec_query_params.append(original_form_params["zip_code"] + "%")
+            fec_query_params.append(fec_zip[:5] + "%")
             
         fec_query += " ORDER BY c.contribution_date DESC LIMIT 50"
         fec_cursor.execute(fec_query, fec_query_params)
@@ -861,7 +869,9 @@ def person_view_results():
         fec_conn.close()
     except Exception as e:
         print(f"FEC search error: {e}")
-    
+    print(f"⏱️ FEC query: {_time.time() - _t0:.2f}s")
+
+    _t1 = _time.time()
     # Search CA database
     ca_results = []
     ca_total = 0
@@ -872,22 +882,22 @@ def person_view_results():
             SELECT DISTINCT c.first_name, c.last_name, c.city, c.state, c.zip_code, c.contribution_date,
                    COALESCE(fc.committee_name, 'Committee ID: ' || c.recipient_committee_id) as recipient_display,
                    c.amount, 'CA Committee' as recipient_type
-            FROM contributions c 
+            FROM contributions c
             LEFT JOIN filing_committee_mapping fc ON c.recipient_committee_id = fc.filing_id
-            WHERE UPPER(c.first_name) = ? AND UPPER(c.last_name) = ?
+            WHERE c.first_name = ? COLLATE NOCASE AND c.last_name = ? COLLATE NOCASE
         """
         ca_query_params = [original_form_params["first_name"], original_form_params["last_name"]]
         
         # Add optional filters for CA using correct column names
         if original_form_params["city"]:
-            ca_query += " AND UPPER(c.city) = ?"
+            ca_query += " AND c.city = ? COLLATE NOCASE"
             ca_query_params.append(original_form_params["city"])
         if original_form_params["state"]:
-            ca_query += " AND UPPER(c.state) = ?"
+            ca_query += " AND c.state = ? COLLATE NOCASE"
             ca_query_params.append(original_form_params["state"])
         else:
             # Default to CA state if no state specified
-            ca_query += " AND UPPER(c.state) = ?"
+            ca_query += " AND c.state = ? COLLATE NOCASE"
             ca_query_params.append("CA")
             
         if original_form_params["zip_code"]:
@@ -905,6 +915,7 @@ def person_view_results():
         ca_conn.close()
     except Exception as e:
         print(f"CA search error: {e}")
+    print(f"⏱️ CA query: {_time.time() - _t1:.2f}s")
 
     # Generate search queries for API-based search
     search_queries = {}
@@ -950,10 +961,12 @@ def person_view_results():
     search_queries["linkedin"] = f"site:linkedin.com {full_name}"
     search_queries["news"] = f"{full_name} news"
 
-    # Perform comprehensive API-based search
-    print(f"\n🔍 Starting API search with queries: {search_queries}")
-    api_search_results = perform_comprehensive_search(search_queries)
-    print(f"📊 API search results: {api_search_results}")
+    # Perform comprehensive API-based search (only when enrichment is requested)
+    api_search_results = {}
+    if request.args.get("enrich"):
+        print(f"\n🔍 Starting API search with queries: {search_queries}")
+        api_search_results = perform_comprehensive_search(search_queries)
+        print(f"📊 API search results: {api_search_results}")
 
     return render_template_string(UNIFIED_PERSON_RESULTS_TEMPLATE,
                                 original_params=original_form_params,
@@ -993,7 +1006,7 @@ def contributor_view():
         base_where_clauses.append("c.state = ?")
         query_params.append(state)
     if zip_code:
-        if app_state.current_db == "ca":
+        if get_current_db() == "ca":
             # Use normalized ZIP for CA
             zip_digits = "".join(ch for ch in zip_code if ch.isdigit())
             zip5 = zip_digits[:5]
@@ -1007,7 +1020,7 @@ def contributor_view():
     where_string = " AND ".join(base_where_clauses)
     
     # Database-specific queries
-    if app_state.current_db == "ca":
+    if get_current_db() == "ca":
         # CA database query
         from_clause = "FROM contributions c LEFT JOIN filing_committee_mapping fc ON c.recipient_committee_id = fc.filing_id"
         
@@ -1083,7 +1096,7 @@ def contributor_view():
     if state: pagination_params["state"] = state
     if zip_code: pagination_params["zip"] = zip_code
     if sort_by != "date_desc": pagination_params["sort_by"] = sort_by
-    base_pagination_url = "/contributor?" + urlencode(pagination_params)
+    base_pagination_url = URL_PREFIX + "/contributor?" + urlencode(pagination_params)
 
     # Construct filter description string
     filter_desc = f"{first} {last}"
@@ -1122,7 +1135,7 @@ def search_recipients_by_name():
         conn = get_db()
         cursor = conn.cursor()
         
-        if app_state.current_db == "ca":
+        if get_current_db() == "ca":
             # CA database - use ca_recipient_lookup table with FTS search
             print(f"\n🔍 Using CA recipient lookup table for fuzzy search: '{name_query}'")
             
@@ -1372,6 +1385,420 @@ def api_search():
     
     return jsonify(results)
 
+
+# --- Ported API endpoints from app.py ---
+
+def get_donor_percentiles_by_year(first_name, last_name, zip_code):
+    """Get percentile rankings for a donor across all years they have data."""
+    if not zip_code or len(zip_code) < 5:
+        return {}
+    zip5 = zip_code[:5]
+    donor_key = f"{first_name}|{last_name}|{zip5}"
+    conn = get_db("fec")
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT year, total_amount, contribution_count
+        FROM donor_totals_by_year WHERE donor_key = ? ORDER BY year DESC
+    """, (donor_key,))
+    donor_years = cursor.fetchall()
+    if not donor_years:
+        conn.close()
+        return {}
+    percentiles = {}
+    for year, total_amount, contrib_count in donor_years:
+        cursor.execute("SELECT COUNT(*) FROM donor_totals_by_year WHERE year = ? AND total_amount > ?", (year, total_amount))
+        donors_above = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM donor_totals_by_year WHERE year = ?", (year,))
+        total_donors = cursor.fetchone()[0]
+        if total_donors > 0:
+            percentiles[year] = {
+                "percentile": ((total_donors - donors_above) / total_donors) * 100,
+                "rank": donors_above + 1,
+                "total_amount": total_amount,
+                "contribution_count": contrib_count,
+                "total_donors": total_donors,
+            }
+    conn.close()
+    return percentiles
+
+
+@app.route("/api/person", methods=["GET"])
+def api_person():
+    """JSON API: Person search returning both FEC and CA contributions."""
+    first_name = request.args.get("first_name", "").strip().upper()
+    last_name = request.args.get("last_name", "").strip().upper()
+    city = request.args.get("city", "").strip().upper()
+    state = request.args.get("state", "").strip().upper()
+    zip_code = request.args.get("zip_code", "").strip().upper()
+
+    if not first_name or not last_name:
+        return jsonify({"error": "first_name and last_name are required"}), 400
+
+    # --- FEC search with cascading logic ---
+    fec_contributions = []
+    fec_total = 0.0
+    cascade_message = ""
+    try:
+        conn = get_db("fec")
+        cursor = conn.cursor()
+        base = {"first_name": first_name, "last_name": last_name, "city": city, "zip_code": zip_code, "state": state}
+        db_attempts = [{"params": base.copy(), "level": "All filters"}]
+        if zip_code:
+            a2 = base.copy(); a2["zip_code"] = ""
+            db_attempts.append({"params": a2, "level": "Dropped ZIP"})
+        if city:
+            a3 = base.copy(); a3["zip_code"] = ""; a3["city"] = ""
+            db_attempts.append({"params": a3, "level": "Dropped City & ZIP"})
+
+        for attempt in db_attempts:
+            cp = attempt["params"]
+            wc = ["c.first_name = ?", "c.last_name = ?"]
+            qp = [cp["first_name"], cp["last_name"]]
+            if cp["city"]: wc.append("c.city = ?"); qp.append(cp["city"])
+            if cp["state"]: wc.append("c.state = ?"); qp.append(cp["state"])
+            if cp["zip_code"]: wc.append("c.zip_code LIKE ?"); qp.append(cp["zip_code"] + "%")
+            conduit_ph = ",".join(["?"] * len(FEC_CONDUITS))
+            wc.append(f"c.recipient_name NOT IN ({conduit_ph})")
+            final_qp = qp + list(FEC_CONDUITS.keys())
+            where = " AND ".join(wc)
+
+            cursor.execute(f"SELECT 1 FROM contributions c WHERE {where} LIMIT 1", final_qp)
+            if cursor.fetchone():
+                if attempt["level"] != "All filters":
+                    cascade_message = attempt["level"]
+                cursor.execute(f"SELECT SUM(c.amount) FROM contributions c WHERE {where}", final_qp)
+                result = cursor.fetchone()
+                fec_total = result[0] if result and result[0] else 0.0
+                cursor.execute(
+                    f"""SELECT c.contribution_date, COALESCE(m.name, c.recipient_name),
+                           c.amount, c.recipient_name, c.city, c.state, c.zip_code
+                    FROM contributions c LEFT JOIN committees m ON c.recipient_name = m.committee_id
+                    WHERE {where} ORDER BY c.contribution_date DESC LIMIT ?""",
+                    final_qp + [PERSON_SEARCH_PAGE_SIZE],
+                )
+                fec_contributions = [
+                    {"contribution_date": r[0], "recipient_name": r[1], "amount": r[2],
+                     "committee_id": r[3], "city": r[4], "state": r[5], "zip_code": r[6]}
+                    for r in cursor.fetchall()
+                ]
+                break
+        conn.close()
+    except Exception as e:
+        print(f"API FEC search error: {e}")
+
+    # --- CA search ---
+    ca_contributions = []
+    ca_total = 0.0
+    try:
+        ca_conn = get_db("ca")
+        ca_cursor = ca_conn.cursor()
+        ca_where = ["c.first_name = ? COLLATE NOCASE", "c.last_name = ? COLLATE NOCASE"]
+        ca_params = [first_name, last_name]
+        if city:
+            ca_where.append("c.city = ? COLLATE NOCASE")
+            ca_params.append(city)
+        if state:
+            ca_where.append("c.state = ? COLLATE NOCASE")
+            ca_params.append(state)
+        else:
+            ca_where.append("c.state = ? COLLATE NOCASE")
+            ca_params.append("CA")
+        if zip_code:
+            zip_digits = "".join(ch for ch in zip_code if ch.isdigit())
+            zip5 = zip_digits[:5]
+            ca_where.append("(c.zip_norm LIKE ? OR substr(c.zip_norm,1,5) = ?)")
+            ca_params.extend([zip_digits + "%", zip5])
+        ca_where_clause = " AND ".join(ca_where)
+        ca_cursor.execute(
+            f"""SELECT DISTINCT c.first_name, c.last_name, c.city, c.state, c.zip_code,
+                       c.contribution_date,
+                       COALESCE(fc.committee_name, 'Committee ID: ' || c.recipient_committee_id) as recipient_display,
+                       c.amount
+                FROM contributions c
+                LEFT JOIN filing_committee_mapping fc ON c.recipient_committee_id = fc.filing_id
+                WHERE {ca_where_clause}
+                ORDER BY c.contribution_date DESC LIMIT ?""",
+            ca_params + [PERSON_SEARCH_PAGE_SIZE],
+        )
+        ca_contributions = [
+            {"contribution_date": r[5], "recipient_name": r[6], "amount": r[7],
+             "city": r[2], "state": r[3], "zip_code": r[4]}
+            for r in ca_cursor.fetchall()
+        ]
+        ca_total = sum(float(c["amount"]) for c in ca_contributions if c["amount"])
+        ca_conn.close()
+    except Exception as e:
+        print(f"API CA search error: {e}")
+
+    resp = {
+        "person": {"first_name": first_name, "last_name": last_name,
+                    "city": city, "state": state, "zip_code": zip_code},
+        "fec": {"contributions": fec_contributions, "total_giving": fec_total},
+        "ca": {"contributions": ca_contributions, "total_giving": ca_total},
+    }
+    if cascade_message:
+        resp["cascade_message"] = cascade_message
+    if zip_code:
+        percentiles = get_donor_percentiles_by_year(first_name, last_name, zip_code)
+        resp["percentiles"] = {str(k): v for k, v in percentiles.items()}
+
+    return jsonify(resp)
+
+
+@app.route("/api/contributor", methods=["GET"])
+def api_contributor():
+    """JSON API: Contributor detail with pagination."""
+    first = request.args.get("first_name", "").strip().upper()
+    last = request.args.get("last_name", "").strip().upper()
+    city = request.args.get("city", "").strip().upper()
+    state = request.args.get("state", "").strip().upper()
+    zip_code = request.args.get("zip_code", "").strip().upper()
+    sort_by = request.args.get("sort_by", "contribution_date")
+    order = request.args.get("order", "desc")
+    page = request.args.get("page", 1, type=int)
+    if page < 1: page = 1
+
+    if not first or not last:
+        return jsonify({"error": "first_name and last_name are required"}), 400
+    if sort_by not in {"contribution_date", "amount"}: sort_by = "contribution_date"
+    if order not in {"asc", "desc"}: order = "desc"
+
+    offset = (page - 1) * PAGE_SIZE
+    conn = get_db("fec")
+    cursor = conn.cursor()
+
+    wc = ["c.first_name = ?", "c.last_name = ?"]
+    qp = [first, last]
+    if city: wc.append("c.city = ?"); qp.append(city)
+    if state: wc.append("c.state = ?"); qp.append(state)
+    if zip_code: wc.append("c.zip_code LIKE ?"); qp.append(zip_code + "%")
+    conduit_ph = ",".join(["?"] * len(FEC_CONDUITS))
+    wc.append(f"c.recipient_name NOT IN ({conduit_ph})")
+    final_qp = qp + list(FEC_CONDUITS.keys())
+    where = " AND ".join(wc)
+    from_cl = "FROM contributions c LEFT JOIN committees m ON c.recipient_name = m.committee_id"
+
+    cursor.execute(f"SELECT COUNT(*) {from_cl} WHERE {where}", final_qp)
+    total_results = cursor.fetchone()[0]
+    total_pages = math.ceil(total_results / PAGE_SIZE)
+
+    cursor.execute(
+        f"""SELECT c.contribution_date, COALESCE(m.name, c.recipient_name),
+               c.amount, COALESCE(m.type, ''), c.recipient_name,
+               c.city, c.state, c.zip_code
+        {from_cl} WHERE {where} ORDER BY c.{sort_by} {order} LIMIT ? OFFSET ?""",
+        final_qp + [PAGE_SIZE, offset],
+    )
+    contributions = [
+        {"contribution_date": r[0], "recipient_name": r[1], "amount": r[2],
+         "recipient_type": r[3], "committee_id": r[4], "city": r[5],
+         "state": r[6], "zip_code": r[7]}
+        for r in cursor.fetchall()
+    ]
+    cursor.execute(f"SELECT SUM(c.amount) {from_cl} WHERE {where}", final_qp)
+    total_amount = cursor.fetchone()[0] or 0
+    conn.close()
+
+    percentiles = {}
+    if zip_code:
+        percentiles = get_donor_percentiles_by_year(first, last, zip_code)
+
+    return jsonify({
+        "contributor": {"first_name": first, "last_name": last,
+                        "city": city, "state": state, "zip_code": zip_code},
+        "contributions": contributions, "total_amount": total_amount,
+        "percentiles": {str(k): v for k, v in percentiles.items()},
+        "page": page, "total_pages": total_pages, "total_results": total_results,
+    })
+
+
+@app.route("/api/contributions_by_person", methods=["GET"])
+def api_contributions_by_person():
+    """JSON API: Quick person lookup by name and ZIP."""
+    first_name = request.args.get("first_name", "").strip().upper()
+    last_name = request.args.get("last_name", "").strip().upper()
+    zip_code = request.args.get("zip_code", "").strip().upper()
+
+    if not all([first_name, last_name, zip_code]):
+        return jsonify({"error": "Missing required parameters: first_name, last_name, and zip_code"}), 400
+
+    query = """
+        SELECT c.first_name, c.last_name, c.contribution_date,
+               COALESCE(m.name, c.recipient_name) as recipient_name_resolved,
+               c.amount, COALESCE(m.type, '') as recipient_type_resolved,
+               c.recipient_name as recipient_committee_id,
+               c.city, c.state, c.zip_code
+        FROM contributions c
+        LEFT JOIN committees m ON c.recipient_name = m.committee_id
+        WHERE c.first_name = ? AND c.last_name = ? AND c.zip_code LIKE ?
+          AND c.recipient_name NOT IN ({})
+        ORDER BY c.contribution_date DESC
+        LIMIT 20
+    """.format(",".join(["?"] * len(FEC_CONDUITS)))
+
+    params = [first_name, last_name, zip_code + "%"] + list(FEC_CONDUITS.keys())
+    conn = get_db("fec")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(query, params)
+    contributions = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return jsonify(contributions)
+
+
+@app.route("/api/recipient", methods=["GET"])
+def api_recipient():
+    """JSON API: Recipient detail."""
+    committee_id = request.args.get("committee_id", "").strip()
+    page = request.args.get("page", 1, type=int)
+    if page < 1: page = 1
+
+    if not committee_id:
+        return jsonify({"error": "committee_id is required"}), 400
+
+    if committee_id in FEC_CONDUITS:
+        return jsonify({"name": FEC_CONDUITS[committee_id], "type": "passthrough",
+                        "message": "This is a passthrough platform. No direct contributors shown.",
+                        "contributors": [], "total_amount": 0, "page": 1, "total_pages": 0})
+
+    offset = (page - 1) * PAGE_SIZE
+    conn = get_db("fec")
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT name, type FROM committees WHERE committee_id = ?", (committee_id,))
+    name_row = cursor.fetchone()
+    recipient_name = name_row[0] if name_row else committee_id
+    recipient_type = name_row[1] if name_row else ""
+
+    cursor.execute(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM contributions WHERE recipient_name = ? GROUP BY first_name, last_name)",
+        (committee_id,),
+    )
+    total_results = cursor.fetchone()[0]
+    total_pages = math.ceil(total_results / PAGE_SIZE)
+
+    cursor.execute(
+        """SELECT first_name, last_name, SUM(amount) as total
+        FROM contributions WHERE recipient_name = ?
+        GROUP BY first_name, last_name ORDER BY total DESC LIMIT ? OFFSET ?""",
+        (committee_id, PAGE_SIZE, offset),
+    )
+    contributors = [
+        {"first_name": r[0], "last_name": r[1], "total_amount": r[2]}
+        for r in cursor.fetchall()
+    ]
+
+    cursor.execute("SELECT SUM(amount) FROM contributions WHERE recipient_name = ?", (committee_id,))
+    total_amount = cursor.fetchone()[0] or 0
+    conn.close()
+
+    return jsonify({
+        "name": recipient_name, "type": recipient_type, "committee_id": committee_id,
+        "contributors": contributors, "total_amount": total_amount,
+        "page": page, "total_pages": total_pages, "total_results": total_results,
+    })
+
+
+@app.route("/api/search_recipients", methods=["GET"])
+def api_search_recipients():
+    """JSON API: Search recipients by name."""
+    q = request.args.get("q", "").strip()
+    sort_by = request.args.get("sort_by", "recent_activity")
+    page = request.args.get("page", 1, type=int)
+    if page < 1: page = 1
+
+    if not q:
+        return jsonify({"error": "q (search query) is required"}), 400
+
+    offset = (page - 1) * PAGE_SIZE
+    conn = get_db("fec")
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='recipient_lookup'")
+    has_lookup = cursor.fetchone()[0] > 0
+
+    results = []
+    total_results = 0
+    total_pages = 0
+
+    if has_lookup:
+        if sort_by == "recent_activity":
+            order_clause = "recipient_lookup.recent_contributions DESC, recipient_lookup.recent_amount DESC"
+            order_simple = "recent_contributions DESC, recent_amount DESC"
+        elif sort_by == "total_activity":
+            order_clause = "recipient_lookup.total_contributions DESC, recipient_lookup.total_amount DESC"
+            order_simple = "total_contributions DESC, total_amount DESC"
+        else:
+            order_clause = "recipient_lookup.display_name ASC"
+            order_simple = "display_name ASC"
+
+        cursor.execute(
+            "SELECT COUNT(*) FROM recipient_lookup_fts fts JOIN recipient_lookup ON fts.recipient_name = recipient_lookup.recipient_name WHERE recipient_lookup_fts MATCH ?",
+            (q,),
+        )
+        fts_count = cursor.fetchone()[0]
+
+        if fts_count > 0:
+            total_results = fts_count
+            total_pages = math.ceil(total_results / PAGE_SIZE)
+            cursor.execute(
+                f"""SELECT recipient_lookup.recipient_name, recipient_lookup.display_name, recipient_lookup.committee_type,
+                       recipient_lookup.total_contributions, recipient_lookup.total_amount,
+                       recipient_lookup.recent_contributions, recipient_lookup.recent_amount,
+                       recipient_lookup.last_contribution_date
+                FROM recipient_lookup_fts fts
+                JOIN recipient_lookup ON fts.recipient_name = recipient_lookup.recipient_name
+                WHERE recipient_lookup_fts MATCH ?
+                ORDER BY {order_clause} LIMIT ? OFFSET ?""",
+                (q, PAGE_SIZE, offset),
+            )
+        else:
+            like_params = [f"%{q}%", f"%{q}%"]
+            cursor.execute(
+                "SELECT COUNT(*) FROM recipient_lookup WHERE display_name LIKE ? OR recipient_name LIKE ?",
+                like_params,
+            )
+            total_results = cursor.fetchone()[0]
+            total_pages = math.ceil(total_results / PAGE_SIZE)
+            cursor.execute(
+                f"""SELECT recipient_name, display_name, committee_type,
+                       total_contributions, total_amount, recent_contributions, recent_amount,
+                       last_contribution_date
+                FROM recipient_lookup WHERE display_name LIKE ? OR recipient_name LIKE ?
+                ORDER BY {order_simple} LIMIT ? OFFSET ?""",
+                like_params + [PAGE_SIZE, offset],
+            )
+
+        results = [
+            {"committee_id": r[0], "name": r[1], "type": r[2],
+             "total_contributions": r[3], "total_amount": r[4],
+             "recent_contributions": r[5], "recent_amount": r[6],
+             "last_contribution_date": r[7]}
+            for r in cursor.fetchall()
+        ]
+    else:
+        cursor.execute("SELECT COUNT(*) FROM committees WHERE name LIKE ?", (f"%{q}%",))
+        total_results = cursor.fetchone()[0]
+        total_pages = math.ceil(total_results / PAGE_SIZE)
+        cursor.execute(
+            "SELECT committee_id, name, type FROM committees WHERE name LIKE ? ORDER BY name LIMIT ? OFFSET ?",
+            (f"%{q}%", PAGE_SIZE, offset),
+        )
+        results = [
+            {"committee_id": r[0], "name": r[1], "type": r[2],
+             "total_contributions": 0, "total_amount": 0,
+             "recent_contributions": 0, "recent_amount": 0,
+             "last_contribution_date": None}
+            for r in cursor.fetchall()
+        ]
+
+    conn.close()
+    return jsonify({
+        "results": results, "total_results": total_results,
+        "page": page, "total_pages": total_pages,
+    })
+
+
 @app.route("/debug/person")
 def debug_person_search():
     """Debug endpoint to test person search with API results."""
@@ -1424,7 +1851,7 @@ def recipient_view():
     recipient_name = committee_id  # fallback
     
     try:
-        if app_state.current_db == "ca":
+        if get_current_db() == "ca":
             # CA recipient search - Get recipient name with better fallback
             cursor.execute("SELECT display_name, candidate_first_name, candidate_last_name, office_description FROM ca_recipient_lookup WHERE recipient_name = ?", [committee_id])
             name_result = cursor.fetchone()
@@ -1604,15 +2031,15 @@ UNIFIED_SEARCH_TEMPLATE = """
 <body>
     <div class="db-switcher">
         <h1>{{ db_info.emoji }} {{ db_info.name }} Campaign Finance Search</h1>
-        <a href="/toggle_db?{{ urlencode(request.args) }}" class="db-toggle">
+        <a href="{{ PREFIX }}/toggle_db?{{ urlencode(request.args) }}" class="db-toggle">
             {{ db_info.toggle_emoji }} {{ db_info.toggle_text }}
         </a>
     </div>
     
     <div class="nav-links">
-        <a href="/">🔍 New Search</a>
-        <a href="/search_recipients">👥 Search Recipients</a>
-        <a href="/personsearch">👤 Person Search</a>
+        <a href="{{ PREFIX }}/">🔍 New Search</a>
+        <a href="{{ PREFIX }}/search_recipients">👥 Search Recipients</a>
+        <a href="{{ PREFIX }}/personsearch">👤 Person Search</a>
     </div>
     
     <form method="get">
@@ -1676,21 +2103,21 @@ UNIFIED_SEARCH_TEMPLATE = """
         </tr>
         {% for fn, ln, date, recip, amt, typ, cmte_id, city, state, zip in results %}
           <tr>
-            <td><a href="/contributor?first={{ fn }}&last={{ ln }}&city={{ city|urlencode }}&state={{ state|urlencode }}&zip={{ zip|urlencode }}">{{ fn }}</a></td>
-            <td><a href="/contributor?first={{ fn }}&last={{ ln }}&city={{ city|urlencode }}&state={{ state|urlencode }}&zip={{ zip|urlencode }}">{{ ln }}</a></td>
+            <td><a href="{{ PREFIX }}/contributor?first={{ fn }}&last={{ ln }}&city={{ city|urlencode }}&state={{ state|urlencode }}&zip={{ zip|urlencode }}">{{ fn }}</a></td>
+            <td><a href="{{ PREFIX }}/contributor?first={{ fn }}&last={{ ln }}&city={{ city|urlencode }}&state={{ state|urlencode }}&zip={{ zip|urlencode }}">{{ ln }}</a></td>
             <td>{{ date }}</td>
             <td>
                 {% if recip in ['C00401224', 'C00904466'] %}
-                    <a href="/recipient?committee_id={{ cmte_id }}">ACTBLUE</a>
+                    <a href="{{ PREFIX }}/recipient?committee_id={{ cmte_id }}">ACTBLUE</a>
                     <br><small style="color: #7f8c8d;">→ Final recipient not disclosed</small>
                 {% elif recip == 'C00694323' %}
-                    <a href="/recipient?committee_id={{ cmte_id }}">WINRED</a>
+                    <a href="{{ PREFIX }}/recipient?committee_id={{ cmte_id }}">WINRED</a>
                     <br><small style="color: #7f8c8d;">→ Final recipient not disclosed</small>
                 {% elif recip and recip.startswith('C00') %}
-                    <a href="/recipient?committee_id={{ cmte_id }}"><span style="font-family: monospace; color: #666;">{{ recip }}</span></a>
+                    <a href="{{ PREFIX }}/recipient?committee_id={{ cmte_id }}"><span style="font-family: monospace; color: #666;">{{ recip }}</span></a>
                     <br><small style="color: #f39c12;">→ Pass-through service</small>
                 {% else %}
-                    <a href="/recipient?committee_id={{ cmte_id }}">{{ recip }}</a>
+                    <a href="{{ PREFIX }}/recipient?committee_id={{ cmte_id }}">{{ recip }}</a>
                 {% endif %}
                 <a href="https://www.google.com/search?q={{ recip|quote_plus }}" class="info-link" target="_blank" title="Search Google for {{ recip }}">&#x24D8;</a>
             </td>
@@ -1704,7 +2131,7 @@ UNIFIED_SEARCH_TEMPLATE = """
       </table>
       {% if total_pages > 1 %}
       <div class="pagination">
-          {% set base_url = "/?" + urlencode(pagination_params) %}
+          {% set base_url = PREFIX + "/?" + urlencode(pagination_params) %}
           {% if page > 1 %}
               <a href="{{ base_url }}&page={{ page - 1 }}">&laquo; Previous</a>
           {% endif %}
@@ -1764,12 +2191,12 @@ PERSON_SEARCH_TEMPLATE = """
     <p class="search-description">Search across both Federal (FEC) and California campaign finance databases</p>
     
     <div class="nav-links">
-        <a href="/">🔍 Contribution Search</a>
-        <a href="/search_recipients">👥 Search Recipients</a>
-        <a href="/personsearch">👤 Person Search</a>
+        <a href="{{ PREFIX }}/">🔍 Contribution Search</a>
+        <a href="{{ PREFIX }}/search_recipients">👥 Search Recipients</a>
+        <a href="{{ PREFIX }}/personsearch">👤 Person Search</a>
     </div>
     
-    <form method="get" action="/person" onsubmit="document.getElementById('searchButton').disabled = true; document.getElementById('loading').style.display = 'block';">
+    <form method="get" action="{{ PREFIX }}/person" onsubmit="document.getElementById('searchButton').disabled = true; document.getElementById('loading').style.display = 'block';">
         <div class="form-group">
             <label for="first">First Name:</label>
             <input type="text" id="first" name="first" required>
@@ -1806,6 +2233,12 @@ PERSON_SEARCH_TEMPLATE = """
                 <label for="email">Email Address:</label>
                 <input type="email" id="email" name="email">
             </div>
+        </div>
+
+        <div class="form-group" style="margin-top: 10px;">
+            <label style="display: inline; font-weight: normal;">
+                <input type="checkbox" name="enrich" value="1"> Include web search enrichment (slower)
+            </label>
         </div>
 
         <input type="submit" value="Search Both Databases" id="searchButton">
@@ -1870,9 +2303,9 @@ UNIFIED_PERSON_RESULTS_TEMPLATE = """
 </head>
 <body>
     <div class="nav-links">
-        <a href="/">🔍 Contribution Search</a>
-        <a href="/search_recipients">👥 Search Recipients</a>
-        <a href="/personsearch">👤 New Person Search</a>
+        <a href="{{ PREFIX }}/">🔍 Contribution Search</a>
+        <a href="{{ PREFIX }}/search_recipients">👥 Search Recipients</a>
+        <a href="{{ PREFIX }}/personsearch">👤 New Person Search</a>
     </div>
 
     <div class="profile-header">
@@ -2090,9 +2523,9 @@ RECIPIENT_SEARCH_TEMPLATE = """
     <h1>{{ get_db_info()['emoji'] }} {{ get_db_info()['name'] }} Recipient Search</h1>
     
     <div class="nav-links">
-        <a href="/">🔍 Contribution Search</a>
-        <a href="/personsearch">👤 Person Search</a>
-        <a href="/search_recipients">👥 Recipient Search</a>
+        <a href="{{ PREFIX }}/">🔍 Contribution Search</a>
+        <a href="{{ PREFIX }}/personsearch">👤 Person Search</a>
+        <a href="{{ PREFIX }}/search_recipients">👥 Recipient Search</a>
     </div>
 
     <form method="get" onsubmit="document.getElementById('recipientSearchButton').disabled = true; document.getElementById('recipientLoadingIndicator').style.display = 'inline';">
@@ -2130,9 +2563,9 @@ RECIPIENT_SEARCH_TEMPLATE = """
                 </tr>
                 {% for committee_id, name, type, total_contrib, total_amt, recent_contrib, recent_amt, last_date in results %}
                   <tr>
-                    <td><a href="/recipient?committee_id={{ committee_id }}">{{ committee_id }}</a></td>
+                    <td><a href="{{ PREFIX }}/recipient?committee_id={{ committee_id }}">{{ committee_id }}</a></td>
                     <td>
-                        <a href="/recipient?committee_id={{ committee_id }}">{{ name }}</a>
+                        <a href="{{ PREFIX }}/recipient?committee_id={{ committee_id }}">{{ name }}</a>
                         <a href="https://www.google.com/search?q={{ name|quote_plus }}" class="info-link" target="_blank" title="Search Google for {{ name }}">&#x24D8;</a>
                     </td>
                     <td>{{ type if type and type != "Unknown" else "PAC" }}</td>
@@ -2227,9 +2660,9 @@ RECIPIENT_DETAIL_TEMPLATE = """
 </head>
 <body>
     <div class="nav-links">
-        <a href="/">🔍 Contribution Search</a>
-        <a href="/search_recipients">👥 Search Recipients</a>
-        <a href="/personsearch">👤 Person Search</a>
+        <a href="{{ PREFIX }}/">🔍 Contribution Search</a>
+        <a href="{{ PREFIX }}/search_recipients">👥 Search Recipients</a>
+        <a href="{{ PREFIX }}/personsearch">👤 Person Search</a>
     </div>
 
     <div class="recipient-header">
@@ -2346,9 +2779,9 @@ RECIPIENT_DETAIL_TEMPLATE = """
     </div>
     
     <div class="nav-links">
-        <a href="/">🔍 New Search</a>
-        <a href="/search_recipients">👥 Search Recipients by Name</a>
-        <a href="/personsearch">👤 Person Search</a>
+        <a href="{{ PREFIX }}/">🔍 New Search</a>
+        <a href="{{ PREFIX }}/search_recipients">👥 Search Recipients by Name</a>
+        <a href="{{ PREFIX }}/personsearch">👤 Person Search</a>
     </div>
     
     <div class="results-summary">
@@ -2368,7 +2801,7 @@ RECIPIENT_DETAIL_TEMPLATE = """
         <tbody>
             {% for contrib in contributors %}
             <tr>
-                <td><a href="/contributor?first={{ contrib[0] }}&last={{ contrib[1] }}">{{ contrib[0] }} {{ contrib[1] }}</a></td>
+                <td><a href="{{ PREFIX }}/contributor?first={{ contrib[0] }}&last={{ contrib[1] }}">{{ contrib[0] }} {{ contrib[1] }}</a></td>
                 <td>{{ contrib[2] }}{% if contrib[2] and contrib[3] %}, {% endif %}{{ contrib[3] }}{% if contrib[4] %} {{ contrib[4] }}{% endif %}</td>
                 <td>{{ contrib[5]|currency if contrib[5] else "$0.00" }}</td>
                 <td>{{ contrib[6] if contrib[6] else 0 }}</td>
@@ -2380,7 +2813,7 @@ RECIPIENT_DETAIL_TEMPLATE = """
     
     {% if total_pages > 1 %}
     <div class="pagination">
-        {% set base_url = "/recipient?committee_id=" + committee_id %}
+        {% set base_url = PREFIX + "/recipient?committee_id=" + committee_id %}
         {% if page > 1 %}
             <a href="{{ base_url }}&page={{ page - 1 }}">&laquo; Previous</a>
         {% endif %}
@@ -2433,9 +2866,9 @@ CONTRIBUTOR_DETAIL_TEMPLATE = """
     <div class="filter-info">{{ get_db_info().name }} Database • Showing contributions matching: {{ filter_desc }}</div>
     
     <div class="nav-links">
-        <a href="/">🔍 New Search</a>
-        <a href="/search_recipients">👥 Search Recipients by Name</a>
-        <a href="/personsearch">👤 Person Search</a>
+        <a href="{{ PREFIX }}/">🔍 New Search</a>
+        <a href="{{ PREFIX }}/search_recipients">👥 Search Recipients by Name</a>
+        <a href="{{ PREFIX }}/personsearch">👤 Person Search</a>
     </div>
     
     <h2>Total Contributed (matching filter, all pages): {{ total_amount_for_contributor|currency }}</h2>
@@ -2460,7 +2893,7 @@ CONTRIBUTOR_DETAIL_TEMPLATE = """
             <tr>
                 <td>{{ r_date }}</td>
                 <td>
-                    <a href="/recipient?committee_id={{ r_cmte_id }}">{{ r_name }}</a>
+                    <a href="{{ PREFIX }}/recipient?committee_id={{ r_cmte_id }}">{{ r_name }}</a>
                     <a href="https://www.google.com/search?q={{ r_name|quote_plus }}" class="info-link" target="_blank" title="Search Google for {{ r_name }}">&#x24D8;</a>
                 </td>
                 <td>{{ r_amt|currency }}</td>
@@ -2497,13 +2930,13 @@ if __name__ == "__main__":
                         help='Default database to use (default: fec)')
     args = parser.parse_args()
 
-    app_state.current_db = args.default_db
+    selected_db = args.default_db
 
     host_ip = '0.0.0.0' if args.public else '127.0.0.1'
-    debug_mode = False if args.public else True 
+    debug_mode = False if args.public else True
 
     print(f"🚀 Starting Unified Campaign Finance App on http://{host_ip}:{args.port}")
-    print(f"📊 Default database: {app_state.current_db.upper()}")
+    print(f"📊 Default database: {selected_db.upper()}")
     print(f"🔄 Toggle between databases using the switch button in the app")
     
     if args.public:

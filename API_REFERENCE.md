@@ -255,7 +255,7 @@ Search for a person's contributions with cascading location logic. Defaults to C
 | `first_name` | string | Yes | | Person's first name |
 | `last_name` | string | Yes | | Person's last name |
 | `city` | string | No | | City filter |
-| `state` | string | No | `CA` | State filter (defaults to CA) |
+| `state` | string | No | | Two-letter state code (searches all states if blank) |
 | `zip_code` | string | No | | ZIP code filter |
 
 **Example request:**
@@ -299,7 +299,7 @@ curl "http://localhost:5000/api/person?first_name=JOHN&last_name=SMITH&zip_code=
 
 **Notes:**
 - Returns up to 10 most recent contributions.
-- If no state is provided, defaults to CA.
+- If no state is provided, searches all states.
 - Cascading search: if initial filters yield no results, ZIP is dropped, then city and ZIP.
 - If filters were relaxed, `cascade_message` field is included.
 
