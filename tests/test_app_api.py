@@ -17,6 +17,8 @@ import app as fec_app
 
 def create_test_db(path):
     """Create a small test database with sample data."""
+    if os.path.exists(path):
+        os.unlink(path)
     conn = sqlite3.connect(path)
     cursor = conn.cursor()
 
