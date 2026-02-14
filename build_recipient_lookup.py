@@ -21,27 +21,90 @@ def build_recipient_lookup():
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
+    # Conservative pragmas for low-memory environments
+    cursor.execute('PRAGMA cache_size = -8000;')
+    cursor.execute('PRAGMA temp_store = DEFAULT;')
+
     # First, create the tables
     print("📋 Creating recipient lookup table...")
     with open("recipient_lookup_table.sql", 'r') as f:
         cursor.executescript(f.read())
-    
+
     # Clear existing data
     cursor.execute("DELETE FROM recipient_lookup")
     cursor.execute("DELETE FROM recipient_lookup_fts")
-    
+
     # Get recent date cutoff
     recent_cutoff = get_recent_date_cutoff()
     print(f"📅 Using recent activity cutoff: {recent_cutoff}")
-    
-    # Build the aggregated data
-    print("📊 Aggregating recipient statistics...")
-    
-    # This query aggregates all the statistics we need in one pass
-    aggregation_query = """
+
+    # Build the aggregated data in batches by recipient_name prefix
+    print("📊 Aggregating recipient statistics in batches...")
+
+    # Batch by first character of recipient_name (A-Z, 0-9, other)
+    prefix_ranges = [
+        ('A', 'D'),  # A-C
+        ('D', 'G'),  # D-F
+        ('G', 'J'),  # G-I
+        ('J', 'M'),  # J-L
+        ('M', 'P'),  # M-O
+        ('P', 'S'),  # P-R
+        ('S', 'V'),  # S-U
+        ('V', '['),  # V-Z ([ comes after Z in ASCII)
+    ]
+
+    excluded = "('C00401224','C00694323','C00708504','C00580100')"
+
+    start_time = time.time()
+    total_inserted = 0
+
+    for range_start, range_end in prefix_ranges:
+        aggregation_query = f"""
+            WITH recipient_stats AS (
+                SELECT
+                    c.recipient_name,
+                    COALESCE(m.name, c.recipient_name) as display_name,
+                    COALESCE(m.type, '') as committee_type,
+                    COUNT(*) as total_contributions,
+                    SUM(c.amount) as total_amount,
+                    SUM(CASE WHEN c.contribution_date >= ? THEN 1 ELSE 0 END) as recent_contributions,
+                    SUM(CASE WHEN c.contribution_date >= ? THEN c.amount ELSE 0 END) as recent_amount,
+                    MIN(c.contribution_date) as first_contribution_date,
+                    MAX(c.contribution_date) as last_contribution_date,
+                    COUNT(DISTINCT c.first_name || '|' || c.last_name || '|' || substr(c.zip_code, 1, 5)) as contributor_count
+                FROM contributions c
+                LEFT JOIN committees m ON c.recipient_name = m.committee_id
+                WHERE c.recipient_name NOT IN {excluded}
+                  AND c.recipient_name >= ? AND c.recipient_name < ?
+                GROUP BY c.recipient_name, display_name, committee_type
+            )
+            INSERT INTO recipient_lookup (
+                recipient_name, display_name, committee_type,
+                total_contributions, total_amount,
+                recent_contributions, recent_amount,
+                first_contribution_date, last_contribution_date,
+                contributor_count, updated_at
+            )
+            SELECT
+                recipient_name, display_name, committee_type,
+                total_contributions, total_amount,
+                recent_contributions, recent_amount,
+                first_contribution_date, last_contribution_date,
+                contributor_count, datetime('now')
+            FROM recipient_stats
+        """
+
+        cursor.execute(aggregation_query, (recent_cutoff, recent_cutoff, range_start, range_end))
+        conn.commit()
+        batch_count = cursor.rowcount
+        total_inserted += batch_count
+        print(f"   Batch {range_start}-{chr(ord(range_end)-1)}: {batch_count:,} recipients")
+
+    # Handle recipients starting with digits or other characters (before 'A')
+    aggregation_query_other = f"""
         WITH recipient_stats AS (
-            SELECT 
+            SELECT
                 c.recipient_name,
                 COALESCE(m.name, c.recipient_name) as display_name,
                 COALESCE(m.type, '') as committee_type,
@@ -54,12 +117,8 @@ def build_recipient_lookup():
                 COUNT(DISTINCT c.first_name || '|' || c.last_name || '|' || substr(c.zip_code, 1, 5)) as contributor_count
             FROM contributions c
             LEFT JOIN committees m ON c.recipient_name = m.committee_id
-            WHERE c.recipient_name NOT IN (
-                'C00401224',  -- ACTBLUE
-                'C00694323',  -- WINRED  
-                'C00708504',  -- NATIONBUILDER
-                'C00580100'   -- REPUBLICAN PLATFORM FUND
-            )
+            WHERE c.recipient_name NOT IN {excluded}
+              AND c.recipient_name < 'A'
             GROUP BY c.recipient_name, display_name, committee_type
         )
         INSERT INTO recipient_lookup (
@@ -69,7 +128,7 @@ def build_recipient_lookup():
             first_contribution_date, last_contribution_date,
             contributor_count, updated_at
         )
-        SELECT 
+        SELECT
             recipient_name, display_name, committee_type,
             total_contributions, total_amount,
             recent_contributions, recent_amount,
@@ -77,21 +136,22 @@ def build_recipient_lookup():
             contributor_count, datetime('now')
         FROM recipient_stats
     """
-    
-    print("⏱️  Executing aggregation query (this may take several minutes)...")
-    start_time = time.time()
-    
-    cursor.execute(aggregation_query, (recent_cutoff, recent_cutoff))
-    
+
+    cursor.execute(aggregation_query_other, (recent_cutoff, recent_cutoff))
+    conn.commit()
+    batch_count = cursor.rowcount
+    total_inserted += batch_count
+    print(f"   Batch 0-9/other: {batch_count:,} recipients")
+
     end_time = time.time()
     elapsed = end_time - start_time
-    
+
     # Get count of records inserted
     cursor.execute("SELECT COUNT(*) FROM recipient_lookup")
     record_count = cursor.fetchone()[0]
-    
+
     print(f"✅ Aggregated {record_count:,} recipients in {elapsed:.2f} seconds")
-    
+
     # Commit the changes
     conn.commit()
     

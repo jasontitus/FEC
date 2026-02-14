@@ -23,47 +23,59 @@ def build_donor_totals_by_year():
     
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    
+
+    # Conservative pragmas for low-memory environments
+    cursor.execute('PRAGMA cache_size = -8000;')
+    cursor.execute('PRAGMA temp_store = DEFAULT;')
+
     # Create the tables
     with open('percentile_tables.sql', 'r') as f:
         cursor.executescript(f.read())
-    
+
     # Clear existing data
     cursor.execute("DELETE FROM donor_totals_by_year")
     cursor.execute("DELETE FROM percentile_thresholds_by_year")
-    
-    # Build donor totals - this groups by proper donor identification
+
+    # Build donor totals year-by-year to reduce working set size
     print("📊 Calculating donor totals by year...")
-    insert_query = """
-    INSERT INTO donor_totals_by_year (donor_key, year, total_amount, contribution_count, first_name, last_name, zip5)
-    SELECT 
-        first_name || '|' || last_name || '|' || substr(zip_code, 1, 5) as donor_key,
-        CAST(strftime('%Y', contribution_date) as INTEGER) as year,
-        SUM(amount) as total_amount,
-        COUNT(*) as contribution_count,
-        first_name,
-        last_name,
-        substr(zip_code, 1, 5) as zip5
-    FROM contributions 
-    WHERE contribution_date IS NOT NULL 
-      AND contribution_date >= '2015-01-01' 
-      AND contribution_date <= '2025-12-31'
-      AND first_name IS NOT NULL 
-      AND last_name IS NOT NULL
-      AND zip_code IS NOT NULL
-    GROUP BY donor_key, year
-    HAVING total_amount > 0  -- Only positive total contributions
-    """
-    
     start_time = time.time()
-    cursor.execute(insert_query)
-    conn.commit()
+    total_records = 0
+
+    for year in range(2015, 2026):
+        year_start = f"{year}-01-01"
+        year_end = f"{year}-12-31"
+
+        insert_query = """
+        INSERT INTO donor_totals_by_year (donor_key, year, total_amount, contribution_count, first_name, last_name, zip5)
+        SELECT
+            first_name || '|' || last_name || '|' || substr(zip_code, 1, 5) as donor_key,
+            CAST(strftime('%Y', contribution_date) as INTEGER) as year,
+            SUM(amount) as total_amount,
+            COUNT(*) as contribution_count,
+            first_name,
+            last_name,
+            substr(zip_code, 1, 5) as zip5
+        FROM contributions
+        WHERE contribution_date IS NOT NULL
+          AND contribution_date >= ?
+          AND contribution_date <= ?
+          AND first_name IS NOT NULL
+          AND last_name IS NOT NULL
+          AND zip_code IS NOT NULL
+        GROUP BY donor_key, year
+        HAVING total_amount > 0
+        """
+
+        cursor.execute(insert_query, (year_start, year_end))
+        conn.commit()
+
+        cursor.execute("SELECT COUNT(*) FROM donor_totals_by_year WHERE year = ?", (year,))
+        year_count = cursor.fetchone()[0]
+        total_records += year_count
+        print(f"   {year}: {year_count:,} donor records")
+
     end_time = time.time()
-    
-    # Get count of records inserted
-    cursor.execute("SELECT COUNT(*) FROM donor_totals_by_year")
-    total_records = cursor.fetchone()[0]
-    
+
     print(f"✅ Inserted {total_records:,} donor-year records in {end_time - start_time:.2f} seconds")
     conn.close()
 

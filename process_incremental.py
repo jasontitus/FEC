@@ -36,50 +36,38 @@ cursor.execute('''
     )
 ''')
 
-# Create a temporary table to help with duplicate detection (for performance)
+# Create a persistent temp table for duplicate detection (stays on disk, not in RAM)
+print("🔍 Building duplicate detection index from existing 2023+ records...")
 cursor.execute('''
-    CREATE TEMPORARY TABLE temp_contribution_hashes (
+    CREATE TEMPORARY TABLE IF NOT EXISTS temp_contribution_hashes (
         record_hash TEXT PRIMARY KEY
     )
 ''')
 
-# Export existing 2023+ records and build hash table in Python (much faster)
-print("🔍 Exporting existing 2023+ records for duplicate detection...")
+# Populate the temp table directly from the DB — no Python memory needed
 cursor.execute('''
-    SELECT first_name, last_name, city, state, zip_code, contribution_date, 
-           recipient_name, amount, recipient_type
+    INSERT OR IGNORE INTO temp_contribution_hashes (record_hash)
+    SELECT
+        COALESCE(first_name, '') || '|' ||
+        COALESCE(last_name, '') || '|' ||
+        COALESCE(city, '') || '|' ||
+        COALESCE(state, '') || '|' ||
+        COALESCE(zip_code, '') || '|' ||
+        COALESCE(contribution_date, '') || '|' ||
+        COALESCE(recipient_name, '') || '|' ||
+        COALESCE(CAST(amount AS TEXT), '') || '|' ||
+        COALESCE(recipient_type, '')
     FROM contributions
     WHERE contribution_date >= '2023-01-01'
 ''')
-
-print("⚡ Building hash table in Python...")
-existing_hashes = set()
-batch_hashes = []
-
-for row in tqdm(cursor.fetchall(), desc="Processing existing records"):
-    record_hash = '|'.join([
-        str(row[0] or ''),  # first_name
-        str(row[1] or ''),  # last_name  
-        str(row[2] or ''),  # city
-        str(row[3] or ''),  # state
-        str(row[4] or ''),  # zip_code
-        str(row[5] or ''),  # contribution_date
-        str(row[6] or ''),  # recipient_name
-        str(row[7] or ''),  # amount
-        str(row[8] or '')   # recipient_type
-    ])
-    existing_hashes.add(record_hash)
-    batch_hashes.append((record_hash,))
-
-# Bulk insert the hashes into temp table
-print("💾 Bulk loading hash table...")
-cursor.executemany('INSERT OR IGNORE INTO temp_contribution_hashes (record_hash) VALUES (?)', batch_hashes)
-print(f"✅ Indexed {len(existing_hashes):,} existing 2023+ records for duplicate detection")
-
 conn.commit()
 
+cursor.execute("SELECT COUNT(*) FROM temp_contribution_hashes")
+hash_count = cursor.fetchone()[0]
+print(f"✅ Indexed {hash_count:,} existing 2023+ records for duplicate detection")
+
 def record_exists(first_name, last_name, city, state, zip_code, contribution_date, recipient_name, amount, recipient_type):
-    """Check if a record already exists in the database (using fast Python set lookup)"""
+    """Check if a record already exists in the database (using SQLite temp table lookup)"""
     record_hash = '|'.join([
         str(first_name or ''),
         str(last_name or ''),
@@ -91,10 +79,11 @@ def record_exists(first_name, last_name, city, state, zip_code, contribution_dat
         str(amount or ''),
         str(recipient_type or '')
     ])
-    return record_hash in existing_hashes
+    cursor.execute("SELECT 1 FROM temp_contribution_hashes WHERE record_hash = ?", (record_hash,))
+    return cursor.fetchone() is not None
 
 def add_record_to_temp_table(first_name, last_name, city, state, zip_code, contribution_date, recipient_name, amount, recipient_type):
-    """Add a record hash to track newly inserted records (both Python set and temp table)"""
+    """Add a record hash to the SQLite temp table for future duplicate checks"""
     record_hash = '|'.join([
         str(first_name or ''),
         str(last_name or ''),
@@ -106,7 +95,7 @@ def add_record_to_temp_table(first_name, last_name, city, state, zip_code, contr
         str(amount or ''),
         str(recipient_type or '')
     ])
-    existing_hashes.add(record_hash)  # Add to Python set for future lookups
+    cursor.execute("INSERT OR IGNORE INTO temp_contribution_hashes (record_hash) VALUES (?)", (record_hash,))
 
 def process_file_incrementally(file_path, description="Processing"):
     """Process a single file and add only new records"""

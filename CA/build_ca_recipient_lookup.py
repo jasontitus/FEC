@@ -23,92 +23,113 @@ def build_ca_recipient_lookup():
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
+    # Conservative pragmas for low-memory environments
+    cursor.execute('PRAGMA cache_size = -8000;')
+    cursor.execute('PRAGMA temp_store = DEFAULT;')
+
     # First, create the tables
     print("📋 Creating California recipient lookup table...")
     with open(os.path.join(SCRIPT_DIR, "ca_recipient_lookup_table.sql"), 'r') as f:
         cursor.executescript(f.read())
-    
+
     # Clear existing data
     cursor.execute("DELETE FROM ca_recipient_lookup")
     cursor.execute("DELETE FROM ca_recipient_lookup_fts")
-    
+
     # Get recent date cutoff
     recent_cutoff = get_recent_date_cutoff()
     print(f"📅 Using recent activity cutoff: {recent_cutoff}")
-    
-    # Build the aggregated data
-    print("📊 Aggregating California recipient statistics...")
-    
-    # This query aggregates all the statistics we need in one pass
-    aggregation_query = """
-        WITH recipient_stats AS (
-            SELECT 
-                c.recipient_committee_id as recipient_name,
-                COALESCE(cm.name, c.recipient_committee_id) as display_name,
-                COALESCE(cm.committee_type, '') as committee_type,
-                COALESCE(cm.entity_code, '') as entity_code,
-                cm.city,
-                cm.state,
-                cm.zip_code,
-                cm.phone,
-                cm.email,
-                cm.candidate_last_name,
-                cm.candidate_first_name,
-                cm.office_description,
-                cm.jurisdiction_description,
-                COUNT(*) as total_contributions,
-                SUM(c.amount) as total_amount,
-                SUM(CASE WHEN c.contribution_date >= ? THEN 1 ELSE 0 END) as recent_contributions,
-                SUM(CASE WHEN c.contribution_date >= ? THEN c.amount ELSE 0 END) as recent_amount,
-                MIN(c.contribution_date) as first_contribution_date,
-                MAX(c.contribution_date) as last_contribution_date,
-                COUNT(DISTINCT c.first_name || '|' || c.last_name || '|' || substr(c.zip_code, 1, 5)) as contributor_count
-            FROM contributions c
-            LEFT JOIN committees cm ON c.recipient_committee_id = cm.committee_id
-            WHERE c.recipient_committee_id IS NOT NULL 
-              AND c.recipient_committee_id != ''
-            GROUP BY c.recipient_committee_id, display_name, committee_type, cm.entity_code,
-                     cm.city, cm.state, cm.zip_code, cm.phone, cm.email,
-                     cm.candidate_last_name, cm.candidate_first_name,
-                     cm.office_description, cm.jurisdiction_description
-        )
-        INSERT INTO ca_recipient_lookup (
-            recipient_name, display_name, committee_type, entity_code,
-            city, state, zip_code, phone, email,
-            candidate_last_name, candidate_first_name,
-            office_description, jurisdiction_description,
-            total_contributions, total_amount,
-            recent_contributions, recent_amount,
-            first_contribution_date, last_contribution_date,
-            contributor_count, updated_at
-        )
-        SELECT 
-            recipient_name, display_name, committee_type, entity_code,
-            city, state, zip_code, phone, email,
-            candidate_last_name, candidate_first_name,
-            office_description, jurisdiction_description,
-            total_contributions, total_amount,
-            recent_contributions, recent_amount,
-            first_contribution_date, last_contribution_date,
-            contributor_count, datetime('now')
-        FROM recipient_stats
-    """
-    
-    print("⏱️  Executing aggregation query (this may take several minutes)...")
+
+    # Build the aggregated data in batches by recipient_committee_id prefix
+    print("📊 Aggregating California recipient statistics in batches...")
+
+    # CA recipient_committee_id values are numeric filer IDs, so batch by first digit
+    # Also handle alphabetic IDs just in case
+    prefix_ranges = [
+        ('0', '2'),  # 0-1
+        ('2', '4'),  # 2-3
+        ('4', '6'),  # 4-5
+        ('6', '8'),  # 6-7
+        ('8', 'A'),  # 8-9
+        ('A', 'N'),  # A-M
+        ('N', '['),  # N-Z
+    ]
+
     start_time = time.time()
-    
-    cursor.execute(aggregation_query, (recent_cutoff, recent_cutoff))
-    
+    total_inserted = 0
+
+    for range_start, range_end in prefix_ranges:
+        aggregation_query = """
+            WITH recipient_stats AS (
+                SELECT
+                    c.recipient_committee_id as recipient_name,
+                    COALESCE(cm.name, c.recipient_committee_id) as display_name,
+                    COALESCE(cm.committee_type, '') as committee_type,
+                    COALESCE(cm.entity_code, '') as entity_code,
+                    cm.city,
+                    cm.state,
+                    cm.zip_code,
+                    cm.phone,
+                    cm.email,
+                    cm.candidate_last_name,
+                    cm.candidate_first_name,
+                    cm.office_description,
+                    cm.jurisdiction_description,
+                    COUNT(*) as total_contributions,
+                    SUM(c.amount) as total_amount,
+                    SUM(CASE WHEN c.contribution_date >= ? THEN 1 ELSE 0 END) as recent_contributions,
+                    SUM(CASE WHEN c.contribution_date >= ? THEN c.amount ELSE 0 END) as recent_amount,
+                    MIN(c.contribution_date) as first_contribution_date,
+                    MAX(c.contribution_date) as last_contribution_date,
+                    COUNT(DISTINCT c.first_name || '|' || c.last_name || '|' || substr(c.zip_code, 1, 5)) as contributor_count
+                FROM contributions c
+                LEFT JOIN committees cm ON c.recipient_committee_id = cm.committee_id
+                WHERE c.recipient_committee_id IS NOT NULL
+                  AND c.recipient_committee_id != ''
+                  AND c.recipient_committee_id >= ? AND c.recipient_committee_id < ?
+                GROUP BY c.recipient_committee_id, display_name, committee_type, cm.entity_code,
+                         cm.city, cm.state, cm.zip_code, cm.phone, cm.email,
+                         cm.candidate_last_name, cm.candidate_first_name,
+                         cm.office_description, cm.jurisdiction_description
+            )
+            INSERT INTO ca_recipient_lookup (
+                recipient_name, display_name, committee_type, entity_code,
+                city, state, zip_code, phone, email,
+                candidate_last_name, candidate_first_name,
+                office_description, jurisdiction_description,
+                total_contributions, total_amount,
+                recent_contributions, recent_amount,
+                first_contribution_date, last_contribution_date,
+                contributor_count, updated_at
+            )
+            SELECT
+                recipient_name, display_name, committee_type, entity_code,
+                city, state, zip_code, phone, email,
+                candidate_last_name, candidate_first_name,
+                office_description, jurisdiction_description,
+                total_contributions, total_amount,
+                recent_contributions, recent_amount,
+                first_contribution_date, last_contribution_date,
+                contributor_count, datetime('now')
+            FROM recipient_stats
+        """
+
+        cursor.execute(aggregation_query, (recent_cutoff, recent_cutoff, range_start, range_end))
+        conn.commit()
+        batch_count = cursor.rowcount
+        total_inserted += batch_count
+        print(f"   Batch {range_start}-{chr(ord(range_end)-1)}: {batch_count:,} recipients")
+
     end_time = time.time()
     elapsed = end_time - start_time
-    
+
     # Get count of records inserted
     cursor.execute("SELECT COUNT(*) FROM ca_recipient_lookup")
     record_count = cursor.fetchone()[0]
-    
+
     print(f"✅ Aggregated {record_count:,} California recipients in {elapsed:.2f} seconds")
-    
+
     # Commit the changes
     conn.commit()
     

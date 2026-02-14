@@ -76,10 +76,11 @@ def process_cycle(label, cycle_code):
 
     if not os.path.exists(zip_path):
         print(f"⬇️  Downloading {url}")
-        response = requests.get(url)
+        response = requests.get(url, stream=True)
         if response.status_code == 200:
             with open(zip_path, 'wb') as f:
-                f.write(response.content)
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
             print(f"✅ Downloaded to {zip_path}")
         else:
             print(f"❌ Failed to download: {url}")

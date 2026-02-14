@@ -36,8 +36,8 @@ def create_database():
     # Optimize SQLite for bulk insertion
     cursor.execute('PRAGMA journal_mode = OFF;')
     cursor.execute('PRAGMA synchronous = OFF;')
-    cursor.execute('PRAGMA cache_size = 100000;')
-    cursor.execute('PRAGMA temp_store = MEMORY;')
+    cursor.execute('PRAGMA cache_size = -8000;')
+    cursor.execute('PRAGMA temp_store = DEFAULT;')
 
     # Create main contributions table
     cursor.execute('''
