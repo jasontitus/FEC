@@ -246,18 +246,40 @@ def process_committees(conn):
     mark_processed("CVR_CAMPAIGN_DISCLOSURE_CD.TSV", cursor, conn)
     print("✅ Committees processing complete")
 
+def build_filing_to_filer_map():
+    """Build FILING_ID -> FILER_ID mapping from CVR_CAMPAIGN_DISCLOSURE_CD.TSV."""
+    cvr_file = os.path.join(DATA_DIR, "CVR_CAMPAIGN_DISCLOSURE_CD.TSV")
+    if not os.path.exists(cvr_file):
+        print("⚠️ CVR file not found, filing-to-filer mapping unavailable")
+        return {}
+    print("📋 Building FILING_ID -> FILER_ID mapping...")
+    mapping = {}
+    with open(cvr_file, 'r', encoding='utf-8', errors='replace') as f:
+        reader = csv.DictReader((line.replace('\0', '') for line in f), delimiter='\t')
+        for row in reader:
+            filing_id = row.get('FILING_ID', '').strip()
+            filer_id = row.get('FILER_ID', '').strip()
+            if filing_id and filer_id:
+                mapping[filing_id] = filer_id
+    print(f"   Loaded {len(mapping):,} filing-to-filer mappings")
+    return mapping
+
+
 def process_contributions(conn):
     """Process contributions from RCPT_CD.TSV"""
     cursor = conn.cursor()
     contributions_file = os.path.join(DATA_DIR, "RCPT_CD.TSV")
-    
+
     if already_processed("RCPT_CD.TSV", cursor):
         print("⏩ Contributions already processed, skipping.")
         return
-        
+
     if not os.path.exists(contributions_file):
         print(f"❌ Contributions file not found: {contributions_file}")
         return
+
+    # Build filing_id -> filer_id mapping for resolving committee IDs
+    filing_to_filer = build_filing_to_filer_map()
 
     print("💰 Processing contributions...")
     
@@ -294,13 +316,11 @@ def process_contributions(conn):
                 except (ValueError, TypeError):
                     continue
                 
-                # Get recipient committee ID - try CMTE_ID first, then FILING_ID
+                # Get recipient committee ID - try CMTE_ID first, then map FILING_ID -> FILER_ID
                 recipient_committee_id = row.get('CMTE_ID', '').strip()
                 if not recipient_committee_id:
-                    # Use the filing committee as recipient
                     filing_id = row.get('FILING_ID', '').strip()
-                    # We'll need to map filing_id to committee_id later
-                    recipient_committee_id = filing_id
+                    recipient_committee_id = filing_to_filer.get(filing_id, filing_id)
                 
                 # Parse other fields
                 try:
