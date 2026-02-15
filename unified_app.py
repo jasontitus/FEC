@@ -626,7 +626,7 @@ def search():
                 if current_params["zip_code"]:
                     zip_digits = "".join(ch for ch in current_params["zip_code"] if ch.isdigit())
                     zip5 = zip_digits[:5]
-                    where_clauses.append("(c.zip_norm LIKE ? OR substr(c.zip_norm,1,5) = ?)")
+                    where_clauses.append("(c.zip_code LIKE ? OR substr(c.zip_code,1,5) = ?)")
                     query_params_list.extend([zip_digits + "%", zip5])
                 if current_params["city"]:
                     where_clauses.append("c.city = ? COLLATE NOCASE")
@@ -673,11 +673,11 @@ def search():
                     # Data query for CA
                     base_select_columns = """
                         c.first_name, c.last_name, c.contribution_date,
-                        COALESCE(cm.committee_name, 'Committee ID: ' || c.recipient_committee_id), c.amount, 
+                        COALESCE(cm.name, 'Committee ID: ' || c.recipient_committee_id), c.amount,
                         COALESCE(cm.committee_type, ''), c.recipient_committee_id,
                         c.city, c.state, c.zip_code
                     """
-                    from_join_clause = "FROM contributions c LEFT JOIN filing_committee_mapping cm ON c.recipient_committee_id = cm.filing_id"
+                    from_join_clause = "FROM contributions c LEFT JOIN committees cm ON c.recipient_committee_id = cm.committee_id"
                     
                     data_query_sql = (
                         f"SELECT {base_select_columns} {from_join_clause}{where_string} "
@@ -880,10 +880,10 @@ def person_view_results():
         ca_cursor = ca_conn.cursor()
         ca_query = """
             SELECT DISTINCT c.first_name, c.last_name, c.city, c.state, c.zip_code, c.contribution_date,
-                   COALESCE(fc.committee_name, 'Committee ID: ' || c.recipient_committee_id) as recipient_display,
+                   COALESCE(fc.name, 'Committee ID: ' || c.recipient_committee_id) as recipient_display,
                    c.amount, 'CA Committee' as recipient_type
             FROM contributions c
-            LEFT JOIN filing_committee_mapping fc ON c.recipient_committee_id = fc.filing_id
+            LEFT JOIN committees fc ON c.recipient_committee_id = fc.committee_id
             WHERE c.first_name = ? COLLATE NOCASE AND c.last_name = ? COLLATE NOCASE
         """
         ca_query_params = [original_form_params["first_name"], original_form_params["last_name"]]
@@ -904,7 +904,7 @@ def person_view_results():
             # Use normalized ZIP column for CA database
             zip_digits = "".join(ch for ch in original_form_params["zip_code"] if ch.isdigit())
             zip5 = zip_digits[:5]
-            ca_query += " AND (c.zip_norm LIKE ? OR substr(c.zip_norm,1,5) = ?)"
+            ca_query += " AND (c.zip_code LIKE ? OR substr(c.zip_code,1,5) = ?)"
             ca_query_params.extend([zip_digits + "%", zip5])
             
         ca_query += " ORDER BY c.contribution_date DESC LIMIT 50"
@@ -1010,7 +1010,7 @@ def contributor_view():
             # Use normalized ZIP for CA
             zip_digits = "".join(ch for ch in zip_code if ch.isdigit())
             zip5 = zip_digits[:5]
-            base_where_clauses.append("(c.zip_norm LIKE ? OR substr(c.zip_norm,1,5) = ?)")
+            base_where_clauses.append("(c.zip_code LIKE ? OR substr(c.zip_code,1,5) = ?)")
             query_params.extend([zip_digits + "%", zip5])
         else:
             # Use regular zip_code for FEC
@@ -1022,8 +1022,8 @@ def contributor_view():
     # Database-specific queries
     if get_current_db() == "ca":
         # CA database query
-        from_clause = "FROM contributions c LEFT JOIN filing_committee_mapping fc ON c.recipient_committee_id = fc.filing_id"
-        
+        from_clause = "FROM contributions c LEFT JOIN committees fc ON c.recipient_committee_id = fc.committee_id"
+
         # Sort order
         if sort_by == "date_asc":
             order_clause = "c.contribution_date ASC"
@@ -1038,7 +1038,7 @@ def contributor_view():
         
         data_query_sql = f"""
             SELECT c.contribution_date, 
-                   COALESCE(fc.committee_name, 'Committee ID: ' || c.recipient_committee_id) as recipient_display,
+                   COALESCE(fc.name, 'Committee ID: ' || c.recipient_committee_id) as recipient_display,
                    c.amount, c.recipient_committee_id,
                    c.city, c.state, c.zip_code
             {from_clause}
@@ -1506,16 +1506,16 @@ def api_person():
         if zip_code:
             zip_digits = "".join(ch for ch in zip_code if ch.isdigit())
             zip5 = zip_digits[:5]
-            ca_where.append("(c.zip_norm LIKE ? OR substr(c.zip_norm,1,5) = ?)")
+            ca_where.append("(c.zip_code LIKE ? OR substr(c.zip_code,1,5) = ?)")
             ca_params.extend([zip_digits + "%", zip5])
         ca_where_clause = " AND ".join(ca_where)
         ca_cursor.execute(
             f"""SELECT DISTINCT c.first_name, c.last_name, c.city, c.state, c.zip_code,
                        c.contribution_date,
-                       COALESCE(fc.committee_name, 'Committee ID: ' || c.recipient_committee_id) as recipient_display,
+                       COALESCE(fc.name, 'Committee ID: ' || c.recipient_committee_id) as recipient_display,
                        c.amount
                 FROM contributions c
-                LEFT JOIN filing_committee_mapping fc ON c.recipient_committee_id = fc.filing_id
+                LEFT JOIN committees fc ON c.recipient_committee_id = fc.committee_id
                 WHERE {ca_where_clause}
                 ORDER BY c.contribution_date DESC LIMIT ?""",
             ca_params + [PERSON_SEARCH_PAGE_SIZE],
