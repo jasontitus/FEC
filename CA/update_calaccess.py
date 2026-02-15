@@ -102,47 +102,87 @@ def check_for_updates(metadata, logger):
     return changed, remote_info
 
 
-def download_file(logger):
-    """Stream-download the CalAccess ZIP to a temp file, then atomic rename."""
+def download_file(logger, max_retries=5, retry_delay=10):
+    """Stream-download the CalAccess ZIP with retry and resume support."""
     dest_dir = SCRIPT_DIR
-    fd, tmp_path = tempfile.mkstemp(dir=dest_dir, suffix=".tmp")
-    os.close(fd)
+    tmp_path = os.path.join(dest_dir, "dbwebexport.zip.partial")
 
-    try:
-        logger.info(f"Downloading {CALACCESS_URL} ...")
-        resp = requests.get(CALACCESS_URL, stream=True, timeout=1800)
-        resp.raise_for_status()
+    start_time = time.time()
 
-        total_size = int(resp.headers.get("Content-Length", 0))
+    for attempt in range(1, max_retries + 1):
         downloaded = 0
-        start_time = time.time()
+        headers = {}
+        mode = "wb"
 
-        with open(tmp_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192 * 16):
-                f.write(chunk)
-                downloaded += len(chunk)
-                if total_size > 0 and downloaded % (50 * 1024 * 1024) < 8192 * 16:
-                    pct = (downloaded / total_size) * 100
-                    elapsed = time.time() - start_time
-                    rate = downloaded / elapsed / 1024 / 1024 if elapsed > 0 else 0
-                    logger.info(f"  Progress: {pct:.1f}% ({downloaded / 1024 / 1024:.0f}MB) at {rate:.1f} MB/s")
-
-        shutil.move(tmp_path, ZIP_PATH)
-        elapsed = time.time() - start_time
-        logger.info(f"Download complete: {ZIP_PATH} ({downloaded / 1024 / 1024:.0f}MB in {elapsed:.0f}s)")
-        return True
-
-    except Exception as e:
-        logger.error(f"Download failed: {e}")
+        # Resume from partial download if it exists
         if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        return False
+            downloaded = os.path.getsize(tmp_path)
+            headers["Range"] = f"bytes={downloaded}-"
+            mode = "ab"
+            logger.info(f"Attempt {attempt}/{max_retries}: resuming from {downloaded / 1024 / 1024:.0f}MB")
+        else:
+            logger.info(f"Attempt {attempt}/{max_retries}: starting download of {CALACCESS_URL}")
+
+        try:
+            resp = requests.get(CALACCESS_URL, stream=True, timeout=(30, 120),
+                                headers=headers)
+
+            # If server doesn't support range requests, start over
+            if downloaded > 0 and resp.status_code == 200:
+                logger.info("Server does not support resume, restarting download")
+                downloaded = 0
+                mode = "wb"
+            elif downloaded > 0 and resp.status_code == 206:
+                logger.info(f"Server supports resume, continuing from {downloaded / 1024 / 1024:.0f}MB")
+            elif resp.status_code == 416:
+                # Range not satisfiable — file may already be complete
+                logger.info("Range not satisfiable, file may be complete already")
+                shutil.move(tmp_path, ZIP_PATH)
+                elapsed = time.time() - start_time
+                logger.info(f"Download complete: {ZIP_PATH} ({downloaded / 1024 / 1024:.0f}MB in {elapsed:.0f}s)")
+                return True
+
+            resp.raise_for_status()
+
+            total_size = int(resp.headers.get("Content-Length", 0))
+            if resp.status_code == 200:
+                total_size_full = total_size
+            else:
+                total_size_full = downloaded + total_size
+
+            with open(tmp_path, mode) as f:
+                for chunk in resp.iter_content(chunk_size=8192 * 16):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size_full > 0 and downloaded % (50 * 1024 * 1024) < 8192 * 16:
+                        pct = (downloaded / total_size_full) * 100
+                        elapsed = time.time() - start_time
+                        rate = downloaded / elapsed / 1024 / 1024 if elapsed > 0 else 0
+                        logger.info(f"  Progress: {pct:.1f}% ({downloaded / 1024 / 1024:.0f}MB) at {rate:.1f} MB/s")
+
+            # Download finished successfully
+            shutil.move(tmp_path, ZIP_PATH)
+            elapsed = time.time() - start_time
+            logger.info(f"Download complete: {ZIP_PATH} ({downloaded / 1024 / 1024:.0f}MB in {elapsed:.0f}s)")
+            return True
+
+        except Exception as e:
+            logger.warning(f"Attempt {attempt}/{max_retries} failed: {e}")
+            if attempt < max_retries:
+                wait = retry_delay * attempt
+                logger.info(f"Retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                logger.error(f"Download failed after {max_retries} attempts")
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                return False
 
 
 def extract_zip(logger):
     """Extract the CalAccess ZIP to DATA directory."""
     logger.info(f"Extracting {ZIP_PATH} ...")
-    extract_dir = os.path.join(SCRIPT_DIR, "CalAccess")
+    extract_dir = SCRIPT_DIR
     os.makedirs(extract_dir, exist_ok=True)
     try:
         with zipfile.ZipFile(ZIP_PATH, "r") as zf:

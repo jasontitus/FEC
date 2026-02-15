@@ -155,7 +155,7 @@ def process_committees(conn):
     print("📋 Processing committees...")
     
     with open(committees_file, 'r', encoding='utf-8', errors='replace') as f:
-        reader = csv.DictReader(f, delimiter='\t')
+        reader = csv.DictReader((line.replace('\0', '') for line in f), delimiter='\t')
         batch = []
         
         for row in tqdm(reader, desc="Processing committees"):
@@ -262,7 +262,7 @@ def process_contributions(conn):
     print("💰 Processing contributions...")
     
     with open(contributions_file, 'r', encoding='utf-8', errors='replace') as f:
-        reader = csv.DictReader(f, delimiter='\t')
+        reader = csv.DictReader((line.replace('\0', '') for line in f), delimiter='\t')
         batch = []
         processed_count = 0
         
