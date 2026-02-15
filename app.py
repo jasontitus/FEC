@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template_string, jsonify
+from flask import Flask, request, render_template_string, jsonify, g
 import sqlite3
 import pprint
 import time
@@ -6,6 +6,7 @@ import math # For math.ceil
 from urllib.parse import urlencode, quote_plus # Added quote_plus
 import argparse
 import os
+import logging
 
 app = Flask(__name__)
 URL_PREFIX = os.environ.get('URL_PREFIX', '')
@@ -84,7 +85,7 @@ def normalize_and_format_phone(phone_string):
         # Return None if not 10 digits after cleaning
         return None
 
-# --- Security Headers --- 
+# --- Security Headers ---
 @app.after_request
 def add_security_headers(response):
     response.headers['X-Content-Type-Options'] = 'nosniff'
@@ -92,6 +93,24 @@ def add_security_headers(response):
     response.headers['X-XSS-Protection'] = '1; mode=block'
     # Update CSP to allow Google iframes needed for /person route
     response.headers['Content-Security-Policy'] = "default-src 'self'; frame-src https://www.google.com/; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none';"
+    return response
+
+# --- Debug Request Logging ---
+debug_logger = logging.getLogger('fec.requests')
+
+@app.before_request
+def log_request_start():
+    if app.debug:
+        g.request_start_time = time.time()
+
+@app.after_request
+def log_request_info(response):
+    if app.debug and hasattr(g, 'request_start_time'):
+        duration_ms = (time.time() - g.request_start_time) * 1000
+        debug_logger.debug(
+            '%s %s %s - %.1fms',
+            request.method, request.path, response.status_code, duration_ms
+        )
     return response
 
 # Known passthrough platforms like ActBlue and WinRed
@@ -2186,22 +2205,30 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run FEC Contribution Search Flask App')
     parser.add_argument('--public', action='store_true',
                         help='Run on 0.0.0.0. WARNING: For TESTING ON TRUSTED NETWORKS ONLY. NOT FOR PRODUCTION.')
+    parser.add_argument('--debug', action='store_true',
+                        help='Enable debug mode (request logging, auto-reload). On by default for localhost.')
     args = parser.parse_args()
 
     host_ip = '0.0.0.0' if args.public else '127.0.0.1'
-    # CRITICAL: debug must be False if potentially exposed, even for testing on 0.0.0.0
-    # For true production, use a WSGI server like Gunicorn, not app.run().
-    current_debug_mode = False if args.public else True 
+    # Debug is on by default for localhost, off for public. --debug overrides.
+    current_debug_mode = args.debug if args.debug else (not args.public)
+
+    if current_debug_mode:
+        logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+    else:
+        logging.basicConfig(level=logging.WARNING)
 
     print(f"🚀 Starting Flask server on http://{host_ip}:5000 (Debug mode: {current_debug_mode})")
+    if current_debug_mode:
+        print("📝 Request logging enabled — all requests will be logged with response times")
     if args.public:
         print("**************************************************************************************")
-        print("⚠️  WARNING: Server is running on 0.0.0.0 with debug=False.")
+        print("⚠️  WARNING: Server is running on 0.0.0.0.")
         print("         This is for testing on TRUSTED networks only.")
         print("         DO NOT expose this directly to the internet for production.")
         print("         Use a proper WSGI server (e.g., Gunicorn) and a reverse proxy (e.g., Nginx).")
         print("**************************************************************************************")
-    
+
     # Note: For Gunicorn, you would typically run: gunicorn -w 4 -b 0.0.0.0:5000 app:app
     # And this __main__ block might not even call app.run() in that scenario.
     app.run(debug=current_debug_mode, host=host_ip)

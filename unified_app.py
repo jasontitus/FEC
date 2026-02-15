@@ -4,7 +4,7 @@ Unified Campaign Finance Search Application
 Supports both FEC (Federal) and CalAccess (California) databases
 """
 
-from flask import Flask, request, render_template_string, jsonify, redirect, url_for, make_response
+from flask import Flask, request, render_template_string, jsonify, redirect, url_for, make_response, g
 import sqlite3
 import pprint
 import time
@@ -14,6 +14,7 @@ import requests
 import json
 from urllib.parse import urlencode, quote_plus
 import argparse
+import logging
 
 # Load environment variables from .env file
 try:
@@ -538,6 +539,24 @@ def add_security_headers(response):
     response.headers['X-XSS-Protection'] = '1; mode=block'
     # Updated CSP to allow API calls and remove iframe restrictions
     response.headers['Content-Security-Policy'] = "default-src 'self'; connect-src 'self' https://api.duckduckgo.com https://en.wikipedia.org https://newsapi.org; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; object-src 'none';"
+    return response
+
+# --- Debug Request Logging ---
+debug_logger = logging.getLogger('unified.requests')
+
+@app.before_request
+def log_request_start():
+    if app.debug:
+        g.request_start_time = time.time()
+
+@app.after_request
+def log_request_info(response):
+    if app.debug and hasattr(g, 'request_start_time'):
+        duration_ms = (time.time() - g.request_start_time) * 1000
+        debug_logger.debug(
+            '%s %s %s - %.1fms',
+            request.method, request.path, response.status_code, duration_ms
+        )
     return response
 
 @app.route("/", methods=["GET"])
@@ -2928,18 +2947,27 @@ if __name__ == "__main__":
                         help='Port to run on (default: 5000)')
     parser.add_argument('--default-db', choices=['fec', 'ca'], default='fec',
                         help='Default database to use (default: fec)')
+    parser.add_argument('--debug', action='store_true',
+                        help='Enable debug mode (request logging, auto-reload). On by default for localhost.')
     args = parser.parse_args()
 
     selected_db = args.default_db
 
     host_ip = '0.0.0.0' if args.public else '127.0.0.1'
-    debug_mode = False if args.public else True
+    debug_mode = args.debug if args.debug else (not args.public)
+
+    if debug_mode:
+        logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+    else:
+        logging.basicConfig(level=logging.WARNING)
 
     print(f"🚀 Starting Unified Campaign Finance App on http://{host_ip}:{args.port}")
     print(f"📊 Default database: {selected_db.upper()}")
     print(f"🔄 Toggle between databases using the switch button in the app")
-    
+
+    if debug_mode:
+        print("📝 Request logging enabled — all requests will be logged with response times")
     if args.public:
         print("⚠️  WARNING: Server is running on 0.0.0.0 for testing only.")
-    
+
     app.run(debug=debug_mode, host=host_ip, port=args.port)

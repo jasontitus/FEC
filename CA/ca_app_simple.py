@@ -4,13 +4,15 @@ California Campaign Contributions Web Application
 Simplified version with core functionality
 """
 
-from flask import Flask, request, render_template_string
+from flask import Flask, request, render_template_string, g
 import sqlite3
 import math
+import time
 from urllib.parse import urlencode, quote_plus
 import argparse
 import os
 import pprint
+import logging
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
@@ -96,6 +98,24 @@ KNOWN_CA_CONDUITS = [
     "ActBlue California",
     "WinRed"  # May also appear in CA data
 ]
+
+# --- Debug Request Logging ---
+debug_logger = logging.getLogger('ca.requests')
+
+@app.before_request
+def log_request_start():
+    if app.debug:
+        g.request_start_time = time.time()
+
+@app.after_request
+def log_request_info(response):
+    if app.debug and hasattr(g, 'request_start_time'):
+        duration_ms = (time.time() - g.request_start_time) * 1000
+        debug_logger.debug(
+            '%s %s %s - %.1fms',
+            request.method, request.path, response.status_code, duration_ms
+        )
+    return response
 
 def get_db():
     return sqlite3.connect(DB_PATH)
@@ -331,9 +351,9 @@ def contributor_view():
         zip5 = zip_digits[:5]
         base_where_clauses.append("(c.zip_norm LIKE ? OR substr(c.zip_norm,1,5) = ?)")
         query_params.extend([zip_digits + "%", zip5])
-    
+
     # Handle passthrough exclusion
-        if exclude_passthrough and KNOWN_CA_CONDUITS:
+    if exclude_passthrough and KNOWN_CA_CONDUITS:
         conduit_placeholders = ",".join(["?"] * len(KNOWN_CA_CONDUITS))
         base_where_clauses.append(f"(fc.committee_name IS NULL OR fc.committee_name NOT IN ({conduit_placeholders}))")
         final_query_params = query_params + list(KNOWN_CA_CONDUITS)
@@ -347,15 +367,15 @@ def contributor_view():
     count_query_sql = f"SELECT COUNT(*) {from_clause} WHERE {where_string}"
     
     # Data Query
-        if sort_by == "date_asc":
-            order_clause = "c.contribution_date ASC"
-        elif sort_by == "amount_desc":
-            order_clause = "c.amount DESC, c.contribution_date DESC"
-        elif sort_by == "amount_asc":
-            order_clause = "c.amount ASC, c.contribution_date DESC"
-        else:
-            order_clause = "c.contribution_date DESC"
-        
+    if sort_by == "date_asc":
+        order_clause = "c.contribution_date ASC"
+    elif sort_by == "amount_desc":
+        order_clause = "c.amount DESC, c.contribution_date DESC"
+    elif sort_by == "amount_asc":
+        order_clause = "c.amount ASC, c.contribution_date DESC"
+    else:
+        order_clause = "c.contribution_date DESC"
+
     data_query_sql = f"""
         SELECT c.contribution_date, 
                COALESCE(fc.committee_name, 'Committee ID: ' || c.recipient_committee_id) as recipient_display,
@@ -1619,12 +1639,21 @@ COMMITTEE_TEMPLATE = """
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run California Contribution Search App')
-    parser.add_argument('--public', action='store_true', 
+    parser.add_argument('--public', action='store_true',
                         help='Run on 0.0.0.0. WARNING: For testing only.')
+    parser.add_argument('--debug', action='store_true',
+                        help='Enable debug mode (request logging, auto-reload). On by default for localhost.')
     args = parser.parse_args()
 
     host = '0.0.0.0' if args.public else '127.0.0.1'
-    debug = False if args.public else True
-    
-    print(f"🚀 Starting California app on http://{host}:5001")
+    debug = args.debug if args.debug else (not args.public)
+
+    if debug:
+        logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+    else:
+        logging.basicConfig(level=logging.WARNING)
+
+    print(f"🚀 Starting California app on http://{host}:5001 (Debug mode: {debug})")
+    if debug:
+        print("📝 Request logging enabled — all requests will be logged with response times")
     app.run(debug=debug, host=host, port=5001)

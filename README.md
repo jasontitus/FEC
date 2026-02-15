@@ -214,11 +214,46 @@ python3 setup_from_scratch.py
 python3 app.py                    # Local: http://127.0.0.1:5000
 python3 app.py --public          # Network: http://0.0.0.0:5000 (⚠️ Testing only)
 
-# California Application (Port 5001)  
+# Unified Application (Port 5000, recommended)
+python3 unified_app.py                          # Local, default FEC
+python3 unified_app.py --default-db ca          # Local, default CA
+python3 unified_app.py --public --port 8080     # Network, custom port
+
+# California Application (Port 5001)
 cd CA
 python3 ca_app_simple.py         # Local: http://127.0.0.1:5001
 python3 ca_app_simple.py --public # Network: http://0.0.0.0:5001 (⚠️ Testing only)
 ```
+
+### Debug Mode
+
+Debug mode is **on by default** when running on localhost (i.e. without `--public`). When debug mode is active, every incoming HTTP request is logged to the console with its method, path, status code, and response time in milliseconds. Flask's auto-reloader is also enabled so code changes take effect without restarting.
+
+```bash
+# Debug mode is on automatically for localhost
+python3 app.py
+python3 unified_app.py
+python3 CA/ca_app_simple.py
+
+# Explicitly enable debug mode (useful combined with --public for network debugging)
+python3 app.py --debug
+python3 unified_app.py --debug --public
+python3 CA/ca_app_simple.py --debug --public
+```
+
+Example log output in debug mode:
+```
+2026-02-15 10:23:01,234 [DEBUG] fec.requests: GET / 200 - 142.3ms
+2026-02-15 10:23:05,678 [DEBUG] fec.requests: GET /api/search?last_name=SMITH 200 - 87.1ms
+2026-02-15 10:23:06,012 [DEBUG] fec.requests: GET /contributor?first_name=JOHN&last_name=SMITH 200 - 203.5ms
+```
+
+| Flag | Effect |
+|------|--------|
+| *(no flags)* | Localhost, debug **on** (logging + auto-reload) |
+| `--public` | Network-accessible, debug **off** |
+| `--debug` | Force debug **on** (even with `--public`) |
+| `--public --debug` | Network-accessible with debug logging enabled |
 
 ### 🔍 **Main Search Features (Both Apps)**
 
