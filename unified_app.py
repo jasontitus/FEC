@@ -884,8 +884,7 @@ def person_view_results():
                    c.amount, 'CA Committee' as recipient_type
             FROM contributions c
             LEFT JOIN committees fc ON c.recipient_committee_id = fc.committee_id
-            WHERE c.first_name = ? COLLATE NOCASE AND c.last_name = ? COLLATE NOCASE
-        """
+            WHERE c.first_name = ? COLLATE NOCASE AND c.last_name = ?        """
         ca_query_params = [original_form_params["first_name"], original_form_params["last_name"]]
         
         # Add optional filters for CA using correct column names
@@ -1425,6 +1424,7 @@ def get_donor_percentiles_by_year(first_name, last_name, zip_code):
 @app.route("/api/person", methods=["GET"])
 def api_person():
     """JSON API: Person search returning both FEC and CA contributions."""
+    t_start = time.time()
     first_name = request.args.get("first_name", "").strip().upper()
     last_name = request.args.get("last_name", "").strip().upper()
     city = request.args.get("city", "").strip().upper()
@@ -1434,13 +1434,18 @@ def api_person():
     if not first_name or not last_name:
         return jsonify({"error": "first_name and last_name are required"}), 400
 
+    timings = {}
+
     # --- FEC search with cascading logic ---
     fec_contributions = []
     fec_total = 0.0
     cascade_message = ""
     try:
+        t0 = time.time()
         conn = get_db("fec")
         cursor = conn.cursor()
+        timings["fec_connect"] = round(time.time() - t0, 3)
+
         base = {"first_name": first_name, "last_name": last_name, "city": city, "zip_code": zip_code, "state": state}
         db_attempts = [{"params": base.copy(), "level": "All filters"}]
         if zip_code:
@@ -1462,13 +1467,22 @@ def api_person():
             final_qp = qp + list(FEC_CONDUITS.keys())
             where = " AND ".join(wc)
 
+            t0 = time.time()
             cursor.execute(f"SELECT 1 FROM contributions c WHERE {where} LIMIT 1", final_qp)
-            if cursor.fetchone():
+            exists = cursor.fetchone()
+            timings[f"fec_exists_{attempt['level']}"] = round(time.time() - t0, 3)
+
+            if exists:
                 if attempt["level"] != "All filters":
                     cascade_message = attempt["level"]
+
+                t0 = time.time()
                 cursor.execute(f"SELECT SUM(c.amount) FROM contributions c WHERE {where}", final_qp)
                 result = cursor.fetchone()
                 fec_total = result[0] if result and result[0] else 0.0
+                timings["fec_sum"] = round(time.time() - t0, 3)
+
+                t0 = time.time()
                 cursor.execute(
                     f"""SELECT c.contribution_date, COALESCE(m.name, c.recipient_name),
                            c.amount, c.recipient_name, c.city, c.state, c.zip_code
@@ -1481,6 +1495,7 @@ def api_person():
                      "committee_id": r[3], "city": r[4], "state": r[5], "zip_code": r[6]}
                     for r in cursor.fetchall()
                 ]
+                timings["fec_detail"] = round(time.time() - t0, 3)
                 break
         conn.close()
     except Exception as e:
@@ -1490,18 +1505,21 @@ def api_person():
     ca_contributions = []
     ca_total = 0.0
     try:
+        t0 = time.time()
         ca_conn = get_db("ca")
         ca_cursor = ca_conn.cursor()
-        ca_where = ["c.first_name = ? COLLATE NOCASE", "c.last_name = ? COLLATE NOCASE"]
+        timings["ca_connect"] = round(time.time() - t0, 3)
+
+        ca_where = ["c.first_name = ?", "c.last_name = ?"]
         ca_params = [first_name, last_name]
         if city:
-            ca_where.append("c.city = ? COLLATE NOCASE")
+            ca_where.append("c.city = ?")
             ca_params.append(city)
         if state:
-            ca_where.append("c.state = ? COLLATE NOCASE")
+            ca_where.append("c.state = ?")
             ca_params.append(state)
         else:
-            ca_where.append("c.state = ? COLLATE NOCASE")
+            ca_where.append("c.state = ?")
             ca_params.append("CA")
         if zip_code:
             zip_digits = "".join(ch for ch in zip_code if ch.isdigit())
@@ -1509,6 +1527,8 @@ def api_person():
             ca_where.append("(c.zip_code LIKE ? OR substr(c.zip_code,1,5) = ?)")
             ca_params.extend([zip_digits + "%", zip5])
         ca_where_clause = " AND ".join(ca_where)
+
+        t0 = time.time()
         ca_cursor.execute(
             f"""SELECT DISTINCT c.first_name, c.last_name, c.city, c.state, c.zip_code,
                        c.contribution_date,
@@ -1525,6 +1545,8 @@ def api_person():
              "city": r[2], "state": r[3], "zip_code": r[4]}
             for r in ca_cursor.fetchall()
         ]
+        timings["ca_query"] = round(time.time() - t0, 3)
+
         ca_total = sum(float(c["amount"]) for c in ca_contributions if c["amount"])
         ca_conn.close()
     except Exception as e:
@@ -1539,8 +1561,14 @@ def api_person():
     if cascade_message:
         resp["cascade_message"] = cascade_message
     if zip_code:
+        t0 = time.time()
         percentiles = get_donor_percentiles_by_year(first_name, last_name, zip_code)
         resp["percentiles"] = {str(k): v for k, v in percentiles.items()}
+        timings["percentiles"] = round(time.time() - t0, 3)
+
+    timings["total"] = round(time.time() - t_start, 3)
+    resp["_timings"] = timings
+    print(f"[API /api/person] {first_name} {last_name} zip={zip_code} | timings={timings}")
 
     return jsonify(resp)
 
