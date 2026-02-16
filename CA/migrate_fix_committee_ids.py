@@ -16,6 +16,9 @@ import csv
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from zstd_utils import open_readable
+
 csv.field_size_limit(sys.maxsize)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -25,7 +28,7 @@ DATA_DIR = os.path.join(SCRIPT_DIR, "CalAccess", "DATA")
 
 def migrate():
     cvr_file = os.path.join(DATA_DIR, "CVR_CAMPAIGN_DISCLOSURE_CD.TSV")
-    if not os.path.exists(cvr_file):
+    if not os.path.exists(cvr_file) and not os.path.exists(cvr_file + ".zst"):
         print(f"Error: CVR file not found: {cvr_file}")
         return
 
@@ -51,8 +54,8 @@ def migrate():
     # Load mapping from CVR file
     batch = []
     count = 0
-    with open(cvr_file, 'r', encoding='utf-8', errors='replace') as f:
-        reader = csv.DictReader((line.replace('\0', '') for line in f), delimiter='\t')
+    with open_readable(cvr_file, encoding='utf-8', errors='replace', null_clean=True) as f:
+        reader = csv.DictReader(f, delimiter='\t')
         for row in reader:
             filing_id = row.get('FILING_ID', '').strip()
             filer_id = row.get('FILER_ID', '').strip()

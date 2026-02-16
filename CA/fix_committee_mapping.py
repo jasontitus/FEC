@@ -3,15 +3,20 @@
 Fix committee mapping by creating a FILING_ID to committee name lookup
 """
 
+import os
 import sqlite3
 import csv
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from zstd_utils import open_readable
+
 # Increase CSV field size limit
 csv.field_size_limit(sys.maxsize)
 
-DB_PATH = "ca_contributions.db"
-CVR_FILE = "CalAccess/DATA/CVR_CAMPAIGN_DISCLOSURE_CD.TSV"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(SCRIPT_DIR, "ca_contributions.db")
+CVR_FILE = os.path.join(SCRIPT_DIR, "CalAccess", "DATA", "CVR_CAMPAIGN_DISCLOSURE_CD.TSV")
 
 def create_filing_committee_mapping():
     """Create a mapping table from FILING_ID to committee information."""
@@ -36,7 +41,7 @@ def create_filing_committee_mapping():
     
     print("📋 Processing CVR_CAMPAIGN_DISCLOSURE_CD.TSV...")
     
-    with open(CVR_FILE, 'r', encoding='utf-8', errors='replace') as f:
+    with open_readable(CVR_FILE, encoding='utf-8', errors='replace', null_clean=True) as f:
         reader = csv.DictReader(f, delimiter='\t')
         batch = []
         
