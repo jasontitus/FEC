@@ -18,6 +18,9 @@ import subprocess
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from zstd_utils import compress_and_remove, compress_existing_files
+
 try:
     import requests
 except ImportError:
@@ -318,6 +321,10 @@ def main():
     start_time = time.time()
     metadata = load_metadata()
 
+    # Compress any leftover uncompressed TSV files
+    if not args.dry_run and os.path.isdir(DATA_DIR):
+        compress_existing_files(DATA_DIR, ["*.TSV"], logger)
+
     # Check for updates
     changed, remote_info = check_for_updates(metadata, logger)
 
@@ -351,6 +358,11 @@ def main():
         if not extract_zip(logger):
             success = False
         else:
+            # Compress TSV files and remove the zip
+            compress_existing_files(DATA_DIR, ["*.TSV"], logger)
+            if os.path.exists(ZIP_PATH):
+                os.unlink(ZIP_PATH)
+                logger.info(f"Removed {ZIP_PATH}")
             # Build new database
             if not build_new_database(logger):
                 success = False

@@ -10,6 +10,9 @@ import csv
 import sys
 from datetime import datetime
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from zstd_utils import open_readable
+
 # Optional progress bar
 try:
     from tqdm import tqdm
@@ -148,14 +151,14 @@ def process_committees(conn):
         print("⏩ Committees already processed, skipping.")
         return
         
-    if not os.path.exists(committees_file):
+    if not os.path.exists(committees_file) and not os.path.exists(committees_file + ".zst"):
         print(f"❌ Committee file not found: {committees_file}")
         return
 
     print("📋 Processing committees...")
-    
-    with open(committees_file, 'r', encoding='utf-8', errors='replace') as f:
-        reader = csv.DictReader((line.replace('\0', '') for line in f), delimiter='\t')
+
+    with open_readable(committees_file, encoding='utf-8', errors='replace', null_clean=True) as f:
+        reader = csv.DictReader(f, delimiter='\t')
         batch = []
         
         for row in tqdm(reader, desc="Processing committees"):
@@ -249,13 +252,13 @@ def process_committees(conn):
 def build_filing_to_filer_map():
     """Build FILING_ID -> FILER_ID mapping from CVR_CAMPAIGN_DISCLOSURE_CD.TSV."""
     cvr_file = os.path.join(DATA_DIR, "CVR_CAMPAIGN_DISCLOSURE_CD.TSV")
-    if not os.path.exists(cvr_file):
+    if not os.path.exists(cvr_file) and not os.path.exists(cvr_file + ".zst"):
         print("⚠️ CVR file not found, filing-to-filer mapping unavailable")
         return {}
     print("📋 Building FILING_ID -> FILER_ID mapping...")
     mapping = {}
-    with open(cvr_file, 'r', encoding='utf-8', errors='replace') as f:
-        reader = csv.DictReader((line.replace('\0', '') for line in f), delimiter='\t')
+    with open_readable(cvr_file, encoding='utf-8', errors='replace', null_clean=True) as f:
+        reader = csv.DictReader(f, delimiter='\t')
         for row in reader:
             filing_id = row.get('FILING_ID', '').strip()
             filer_id = row.get('FILER_ID', '').strip()
@@ -274,7 +277,7 @@ def process_contributions(conn):
         print("⏩ Contributions already processed, skipping.")
         return
 
-    if not os.path.exists(contributions_file):
+    if not os.path.exists(contributions_file) and not os.path.exists(contributions_file + ".zst"):
         print(f"❌ Contributions file not found: {contributions_file}")
         return
 
@@ -282,9 +285,9 @@ def process_contributions(conn):
     filing_to_filer = build_filing_to_filer_map()
 
     print("💰 Processing contributions...")
-    
-    with open(contributions_file, 'r', encoding='utf-8', errors='replace') as f:
-        reader = csv.DictReader((line.replace('\0', '') for line in f), delimiter='\t')
+
+    with open_readable(contributions_file, encoding='utf-8', errors='replace', null_clean=True) as f:
+        reader = csv.DictReader(f, delimiter='\t')
         batch = []
         processed_count = 0
         

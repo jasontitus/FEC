@@ -6,6 +6,8 @@ import sys
 import csv
 from tqdm import tqdm
 
+from zstd_utils import open_readable
+
 csv.field_size_limit(sys.maxsize)
 
 # Election cycles and ZIP name mapping
@@ -89,21 +91,19 @@ def process_cycle(label, cycle_code):
         print(f"✅ ZIP already downloaded: {zip_filename}")
 
     # --- Determine the target data file path ---
-    # The primary individual contributions file is 'itcont.txt' or 'itcont'
-    expected_data_file_primary = "itcont.txt"
-    expected_data_file_fallback = "itcont" # If .txt extension is missing in zip/extraction
-    
-    path_to_data_file_primary = os.path.join(cycle_dir, expected_data_file_primary)
-    path_to_data_file_fallback = os.path.join(cycle_dir, expected_data_file_fallback)
+    # Check for itcont.txt.zst, itcont.txt, or itcont (in priority order)
+    path_primary = os.path.join(cycle_dir, "itcont.txt")
+    path_zst = path_primary + ".zst"
+    path_fallback = os.path.join(cycle_dir, "itcont")
 
-    # --- Revised Extraction Logic ---
-    # Extract if the specific data file (itcont.txt or itcont) is not present.
-    if not os.path.exists(path_to_data_file_primary) and not os.path.exists(path_to_data_file_fallback):
-        print(f"📦 Data file ({expected_data_file_primary} or {expected_data_file_fallback}) not found in {cycle_dir}. Extracting ZIP {zip_filename}...")
-        
+    has_data = os.path.exists(path_zst) or os.path.exists(path_primary) or os.path.exists(path_fallback)
+
+    if not has_data:
+        print(f"📦 Data file not found in {cycle_dir}. Extracting ZIP {zip_filename}...")
+
         if not os.path.exists(zip_path):
-            print(f"❌ ZIP file {zip_path} does not exist. Cannot extract. Please check download process or manually place it.")
-            return # Stop processing this cycle
+            print(f"❌ ZIP file {zip_path} does not exist. Cannot extract.")
+            return
 
         try:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
@@ -111,37 +111,28 @@ def process_cycle(label, cycle_code):
                 zip_ref.extractall(cycle_dir)
             print(f"✅ Extraction complete from {zip_filename} to {cycle_dir}")
 
-            # After extraction, verify that one of our target files exists
-            if not os.path.exists(path_to_data_file_primary) and not os.path.exists(path_to_data_file_fallback):
-                print(f"❌ CRITICAL: Neither {expected_data_file_primary} nor {expected_data_file_fallback} found in {cycle_dir} even after extraction.")
-                print(f"   Files in ZIP {zip_filename} were: {zip_ref.namelist() if 'zip_ref' in locals() and hasattr(zip_ref, 'namelist') else 'Unknown (zip error or not read)'}")
+            if not os.path.exists(path_primary) and not os.path.exists(path_fallback):
+                print(f"❌ CRITICAL: No itcont file found in {cycle_dir} after extraction.")
                 print(f"   Files currently in directory {cycle_dir} are: {os.listdir(cycle_dir)}")
-                return # Stop processing this cycle
+                return
         except zipfile.BadZipFile:
-            print(f"❌ Bad ZIP file: {zip_path}. Consider deleting it and re-running to download a fresh copy.")
+            print(f"❌ Bad ZIP file: {zip_path}. Consider deleting it and re-running.")
             return
         except Exception as e:
             print(f"❌ An error occurred during extraction of {zip_path}: {e}")
             return
-    else:
-        if os.path.exists(path_to_data_file_primary):
-            print(f"✅ Data file already exists: {path_to_data_file_primary}")
-        else: # This means path_to_data_file_fallback exists
-            print(f"✅ Data file already exists: {path_to_data_file_fallback}")
 
-    # --- Determine which specific data file to use for parsing ---
-    txt_file_to_parse = ""
-    if os.path.exists(path_to_data_file_primary):
-        txt_file_to_parse = path_to_data_file_primary
-    elif os.path.exists(path_to_data_file_fallback):
-        txt_file_to_parse = path_to_data_file_fallback
+    # Determine which file to parse — open_readable handles .zst transparently
+    if os.path.exists(path_zst) or os.path.exists(path_primary):
+        txt_file_to_parse = path_primary  # open_readable checks for .zst first
+    elif os.path.exists(path_fallback):
+        txt_file_to_parse = path_fallback
     else:
-        # This case should have been caught by the extraction logic and returned.
-        print(f"❌ FATAL ERROR: Could not determine a valid data file ({expected_data_file_primary} or {expected_data_file_fallback}) in {cycle_dir}. Cannot parse.")
+        print(f"❌ FATAL ERROR: Could not determine a valid data file in {cycle_dir}.")
         return
 
     print(f"📄 Parsing {txt_file_to_parse}")
-    with open(txt_file_to_parse, 'r', encoding='latin-1') as f:
+    with open_readable(txt_file_to_parse, encoding='latin-1') as f:
         reader = csv.reader(f, delimiter='|')
         batch = []
         for row in tqdm(reader, desc=f"Inserting {label}"):

@@ -16,6 +16,8 @@ import zipfile
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
+from zstd_utils import compress_and_remove, compress_existing_files
+
 try:
     import requests
 except ImportError:
@@ -178,18 +180,23 @@ def run_processing_pipeline(cycle_dir, logger):
     """Run the full processing pipeline for a given cycle."""
     cycle_path = os.path.join(FEC_DATA_DIR, cycle_dir)
 
-    # Find the itcont.txt file
+    # Find the itcont.txt or itcont.txt.zst file
     itcont_path = None
     for root, dirs, files in os.walk(cycle_path):
         for f in files:
-            if f.lower() == "itcont.txt":
-                itcont_path = os.path.join(root, f)
+            if f.lower() in ("itcont.txt", "itcont.txt.zst"):
+                candidate = os.path.join(root, f)
+                # Prefer the base name (without .zst) for open_readable
+                if f.lower() == "itcont.txt.zst":
+                    itcont_path = candidate[:-4]  # strip .zst for open_readable
+                else:
+                    itcont_path = candidate
                 break
         if itcont_path:
             break
 
     if not itcont_path:
-        logger.warning(f"No itcont.txt found in {cycle_path}")
+        logger.warning(f"No itcont.txt(.zst) found in {cycle_path}")
         return False
 
     logger.info(f"Processing contributions from {itcont_path}")
@@ -301,6 +308,12 @@ def update_cycle(cycle_year, cycle_dir, force, dry_run, logger):
             if extract_zip(indiv_zip, cycle_path, logger):
                 metadata[indiv_url] = indiv_info
                 metadata[indiv_url]["last_downloaded"] = datetime.now().isoformat()
+                # Compress itcont.txt and remove the zip
+                itcont = os.path.join(cycle_path, "itcont.txt")
+                compress_and_remove(itcont, logger)
+                if os.path.exists(indiv_zip):
+                    os.unlink(indiv_zip)
+                    logger.info(f"Removed {indiv_zip}")
             else:
                 success = False
         else:
@@ -313,6 +326,12 @@ def update_cycle(cycle_year, cycle_dir, force, dry_run, logger):
             if extract_zip(cm_zip, cycle_path, logger):
                 metadata[cm_url] = cm_info
                 metadata[cm_url]["last_downloaded"] = datetime.now().isoformat()
+                # Compress cm.txt and remove the zip
+                cm_txt = os.path.join(cycle_path, "cm.txt")
+                compress_and_remove(cm_txt, logger)
+                if os.path.exists(cm_zip):
+                    os.unlink(cm_zip)
+                    logger.info(f"Removed {cm_zip}")
             else:
                 success = False
         else:
@@ -342,6 +361,19 @@ def main():
         cycles = ALL_CYCLES
     else:
         cycles = [{"year": CURRENT_CYCLE_YEAR, "dir": CURRENT_CYCLE_DIR}]
+
+    # Compress any leftover uncompressed files in all cycle dirs
+    if not args.dry_run:
+        for cycle in cycles:
+            cycle_path = os.path.join(FEC_DATA_DIR, cycle["dir"])
+            if os.path.isdir(cycle_path):
+                compress_existing_files(cycle_path, ["*.txt"], logger)
+                # Remove zip files if a .zst already exists for the extracted data
+                for zf in os.listdir(cycle_path):
+                    if zf.endswith(".zip"):
+                        zip_full = os.path.join(cycle_path, zf)
+                        os.unlink(zip_full)
+                        logger.info(f"Removed leftover zip: {zip_full}")
 
     # Download phase
     for cycle in cycles:

@@ -5,6 +5,8 @@ import csv
 import argparse
 from tqdm import tqdm
 
+from zstd_utils import open_readable
+
 csv.field_size_limit(sys.maxsize)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -101,11 +103,11 @@ def process_file_incrementally(file_path, description="Processing"):
     """Process a single file and add only new records"""
     print(f"\n📄 Processing {file_path}")
     
-    if not os.path.exists(file_path):
+    if not os.path.exists(file_path) and not os.path.exists(file_path + ".zst"):
         print(f"❌ File not found: {file_path}")
         return
-    
-    with open(file_path, 'r', encoding='latin-1') as f:
+
+    with open_readable(file_path, encoding='latin-1') as f:
         reader = csv.reader(f, delimiter='|')
         batch = []
         new_records = 0
@@ -188,9 +190,10 @@ def process_file_incrementally(file_path, description="Processing"):
 # Main execution
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Incrementally process FEC contribution data")
+    default_path = os.path.join(SCRIPT_DIR, "fec_data", "2025-2026", "itcont.txt")
     parser.add_argument("file_path", nargs="?",
-                        default=os.path.join(SCRIPT_DIR, "fec_data", "2025-2026", "itcont.txt"),
-                        help="Path to the itcont.txt file to process")
+                        default=default_path,
+                        help="Path to the itcont.txt file to process (will auto-detect .zst)")
     args = parser.parse_args()
 
     print("🚀 Starting incremental FEC data processing with duplicate detection...")
